@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -17,9 +18,9 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from fake_client import (FakeClient, CIRCLE, CUTSCENE, PLAYER_CONTROL, UI_LIST_MENU, EVENT_ITEM_ACTIVATED,
+from fake_client import (FakeClient, MOBY_UPDATE, CIRCLE, CUTSCENE, PLAYER_CONTROL, UI_LIST_MENU, EVENT_ITEM_ACTIVATED,
                          STATE_PLANET, STATE_GIVE_BOLTS, STATE_COMMUNICATION_FLAGS, STATE_UNLOCK_LEVEL, STATE_SAVE_FILE_OPERATION,
-                         SAVE_OPERATION_LOAD)
+                         SAVE_OPERATION_LOAD, LOADING, MOBY_CREATE, MOBY_EX, PLAYER_STATE, MOBY_HIT, API_VERSION_MIRRORING)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 BUILD = os.environ.get('LAWRENCE_BUILD', os.path.join(REPO, 'Lawrence', 'bin', 'publish', 'win-x64'))
@@ -31,9 +32,17 @@ PLUMBER_OCLASS = 774
 
 
 def free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
-        udp.bind(('127.0.0.1', 0))
-        return udp.getsockname()[1]
+    # The server needs the port for both UDP and TCP, and Windows reserves some TCP ranges, so check both
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            udp.bind(('127.0.0.1', 0))
+            port = udp.getsockname()[1]
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+                tcp.bind(('127.0.0.1', port))
+            return port
+        except OSError:
+            continue
 
 
 class LawrenceServer:
@@ -90,6 +99,7 @@ class CoopTestCase(unittest.TestCase):
     def setUp(self):
         self.server = LawrenceServer()
         self.clients = []
+        self.client_options = {}  # username -> FakeClient keyword arguments
 
     def tearDown(self):
         for client in self.clients:
@@ -102,7 +112,7 @@ class CoopTestCase(unittest.TestCase):
         self.server.stop()
 
     def client(self, name):
-        client = FakeClient(name, self.server.port)
+        client = FakeClient(name, self.server.port, **self.client_options.get(name, {}))
         self.clients.append(client)
         client.connect()
         return client
@@ -261,6 +271,47 @@ class CampaignSyncTests(CoopTestCase):
 
         self.assertEqual(guest.ui_creates_with_text('alpha', mark), 1)
 
+    def test_stuck_menu_clears_on_level_load(self):
+        """A lost UI delete left the lobby browser stuck on a player's screen over the game until they reconnected."""
+        host, guest = self.client('alpha'), self.client('bravo')
+        self.create_lobby(host, 'secret')
+        guest.lose_ui_deletes = True
+        self.join_lobby(guest, 'secret')
+        guest.wait_for(lambda: guest.has_text('Options'), what='guest in lobby')
+        self.start(host, guest)
+        guest.wait_for(lambda: guest.states(STATE_PLANET), what='load level')
+        self.assertTrue(guest.has_text('Co-op Lobbies'), 'test setup: the lobby browser should be stuck')
+
+        guest.lose_ui_deletes = False
+        host.enter_level(NOVALIS)
+        guest.enter_level(NOVALIS)
+
+        guest.wait_for(lambda: not guest.has_text('Co-op Lobbies'), timeout=5, what='stuck lobby browser to clear')
+        guest.wait_for(lambda: guest.has_exact_text('alpha'), timeout=5, what="host's nametag drawn again")
+
+    def test_guest_lobby_screen_closes_when_game_starts(self):
+        """Only the host's lobby screen closed on start; the guest's stayed over their game, and Triangle left the lobby."""
+        host, guest = self.lobby_with_two_players()
+        self.start(host, guest)
+        guest.wait_for(lambda: guest.states(STATE_PLANET), what='load level')
+        guest.wait_for(lambda: not guest.has_text('Options'), timeout=3, what="guest's lobby screen to close")
+
+    def test_other_player_movement_is_sent_at_full_rate(self):
+        """Updates for players more than 10 units away were thinned out by distance, making jumps look choppy."""
+        host, guest = self.start_game()
+        guest.move_to(0.0, 0.0, 0.0)
+        time.sleep(0.5)
+
+        mark = guest.mark()
+        frames = 120
+        for frame in range(frames):  # Two seconds of jumping, 60 units away
+            host.move_to(60.0, 0.0, 30.0 + frame * 0.1, animation=frame % 2)
+            time.sleep(1 / 60)
+        time.sleep(0.5)
+
+        received = len(guest.packets(MOBY_UPDATE, mark))
+        self.assertGreater(received, frames * 0.6, f'guest got {received} of {frames} movement updates')
+
     def test_rejoin_started_game(self):
         host, guest = self.start_game()
         guest.disconnect()
@@ -272,6 +323,95 @@ class CampaignSyncTests(CoopTestCase):
         mark = guest.mark()
         guest.press(CIRCLE)
         guest.wait_for(lambda: guest.states(STATE_PLANET, mark), what='load level after rejoin')
+
+
+class MirroringTests(CoopTestCase):
+    def setUp(self):
+        super().setUp()
+        mirroring = {'api_version': API_VERSION_MIRRORING, 'confirm_creates': True}
+        self.client_options = {'alpha': mirroring, 'bravo': dict(mirroring)}
+
+    def guest_sees_host(self, host, guest):
+        return guest.wait_for(lambda: guest.uuid_of(0), what="host's Ratchet created for guest")
+
+    def test_pose_snapshots_reach_other_player_with_their_id_for_sender(self):
+        host, guest = self.start_game()
+        host_uuid = self.guest_sees_host(host, guest)
+
+        mark = guest.mark()
+        payload = bytes(range(116))
+        for frame in range(1, 31):
+            host.send_player_state(frame, payload)
+            time.sleep(1 / 60)
+
+        snapshots = guest.wait_for(lambda: guest.packets(PLAYER_STATE, mark), what='pose snapshots')
+        time.sleep(0.3)
+        snapshots = guest.packets(PLAYER_STATE, mark)
+
+        self.assertGreater(len(snapshots), 20)
+        for body in snapshots:
+            sender, = struct.unpack_from('>H', body, 0)
+            self.assertEqual(sender, host_uuid)
+            self.assertEqual(body[12:], payload)
+
+    def test_old_mod_gets_no_snapshots(self):
+        self.client_options['bravo'] = {'confirm_creates': True}
+        host, guest = self.start_game()
+        self.guest_sees_host(host, guest)
+
+        mark = guest.mark()
+        for frame in range(1, 31):
+            host.send_player_state(frame)
+            time.sleep(1 / 60)
+        time.sleep(0.5)
+
+        self.assertEqual(guest.packets(PLAYER_STATE, mark), [])
+
+    def test_hits_reach_other_player_after_loading(self):
+        host, guest = self.start_game()
+        self.guest_sees_host(host, guest)
+
+        guest.set_game_state(LOADING)
+        host.send_hit(uid=321, o_class=1234, damage=2.5)
+        time.sleep(1)
+        self.assertEqual(guest.packets(MOBY_HIT), [], 'applied while loading')
+
+        guest.set_game_state(PLAYER_CONTROL)
+        hit = guest.wait_for(lambda: guest.packets(MOBY_HIT), what='hit after loading')[0]
+        _, uid, o_class = struct.unpack_from('>HHH', hit, 0)
+        damage, = struct.unpack_from('>f', hit, 16)
+        self.assertEqual((uid, o_class, damage), (321, 1234, 2.5))
+
+    def test_create_not_repeated_while_waiting_for_confirmation(self):
+        # Every repeated create made the game delete and respawn the other player
+        self.client_options['bravo'] = {'api_version': API_VERSION_MIRRORING, 'confirm_creates': False}
+        host, guest = self.start_game()
+        time.sleep(1)
+
+        mark = guest.mark()
+        time.sleep(2)
+        creates = len(guest.packets(MOBY_CREATE, mark))
+        self.assertLessEqual(creates, 6, f'{creates} creates in 2 seconds')
+
+    def test_players_are_not_tinted(self):
+        self.client_options['bravo'] = {'confirm_creates': True}  # An old mod still gets a plain color
+        host, guest = self.start_game()
+        host_uuid_for_guest = self.guest_sees_host(host, guest)
+        guest_uuid_for_host = host.wait_for(lambda: host.uuid_of(0), what="guest's Ratchet created for host")
+        time.sleep(0.5)
+
+        def colors(player, uuid):
+            found = set()
+            for body in player.packets(MOBY_EX):
+                moby, count = struct.unpack_from('>HH', body, 0)
+                for index in range(count):
+                    offset, value = struct.unpack_from('>HI', body, 4 + index * 6)
+                    if moby == uuid and offset == 0x38:
+                        found.add(value)
+            return found
+
+        self.assertEqual(colors(host, guest_uuid_for_host), set(), 'mirroring mod got a color for a player')
+        self.assertEqual(colors(guest, host_uuid_for_guest), {0x7F3F3F3F}, 'old mod got a player tint')
 
 
 class CampaignPersistenceTests(CoopTestCase):

@@ -127,7 +127,7 @@ end
 function LobbyView:OnControllerInputPressed(input)
     if IsButton(input, Gamepad.Circle) then
         if self.lobby.started then
-            self:CloseView()
+            self.PlayerTable:CloseLobbyView()
             self.PlayerTable:Start()
             return
         end
@@ -141,14 +141,14 @@ function LobbyView:OnControllerInputPressed(input)
                 self.startButtonText.Text = "\x11 Ready"
             end
         elseif self.lobby:AllPlayersReady() then
-            self:CloseView()
+            self.PlayerTable:CloseLobbyView()
             self.lobby:Start()
         end
     end
 
     if IsButton(input, Gamepad.Triangle) then
         self.lobby:Leave(self.PlayerTable)
-        self:CloseView()
+        self.PlayerTable:CloseLobbyView()
 
         if #self.lobby.players <= 0 then
             self.lobby:Close()

@@ -46,6 +46,9 @@ public enum MPPacketType : ushort
     MP_PACKET_OPEN_DATA_STREAM = 31,
     MP_PACKET_UPLOAD_FILE = 32,
     MP_PACKET_LEVEL_CONFIGURATION = 33,
+    MP_PACKET_PLAYER_STATE = 34,    // A player's exact pose and attachments for one frame, relayed to the others
+    MP_PACKET_MOBY_HIT = 35,        // A player hit an enemy or object of the level, relayed so the others apply it too
+    MP_PACKET_MOBY_KILLED = 36,     // An enemy or object of the level a player hit is gone
 }
 
 public enum MPStateType : ushort
@@ -70,6 +73,7 @@ public enum MPStateType : ushort
     MP_STATE_START_IN_LEVEL_MOVIE = 18,
     MP_STATE_SAVE_FILE_OPERATION = 19,
     MP_STATE_STANDING_ON_MOBY = 20,
+    MP_STATE_UI_RESET = 21,         // The game lost its server UI and wants it drawn again
 }
 
 public enum MPDamageFlags : uint {

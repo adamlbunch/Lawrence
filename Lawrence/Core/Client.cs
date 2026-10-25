@@ -53,8 +53,15 @@ public interface IClientHandler {
 
 public partial class Client {
     // Which API version we're currently on and which is the minimum version we support. 
-    private static uint API_VERSION = 13;
+    private static uint API_VERSION = 14;
     private static uint API_VERSION_MIN = 13;
+
+    // Version 14 streams each player's exact pose and attachments and shares hits on enemies. Older mods still
+    //  connect, they just don't get any of that.
+    public const uint API_VERSION_MIRRORING = 14;
+
+    public uint ApiVersion { get; private set; } = 13;
+    public bool SupportsMirroring => ApiVersion >= API_VERSION_MIRRORING;
     
     /// <summary>
     /// When true, this client is waiting to connect, and is not yet part of the regular OnTick loop
@@ -589,7 +596,13 @@ partial class Client {
         public long LastUpdate;
         public Moby MobyRef;
         public bool ClientCreated;
+        public long LastCreateSent;
     }
+
+    // How long to wait for the game to confirm a moby we told it to create before telling it again. Creates are
+    //  reliable already, and the game deletes and respawns a moby for every repeat, so sending one every tick until
+    //  the confirmation arrived made other players flicker and take a moment to appear after spawning.
+    private const long CreateRetryTicks = 30;
 
     private readonly ConcurrentDictionary<Guid, ushort> _mobysTable = new();
     private readonly ConcurrentDictionary<ushort, MobyData> _mobys = new();
@@ -643,26 +656,44 @@ partial class Client {
         if (internalId == 0) {
             return;
         }
+
+        long now = Game.Game.Shared().Ticks();
+        var mobyData = _mobys[internalId];
         
-        if (!_mobys[internalId].ClientCreated) {
-            ushort parentInternalId = 0;
-            if (moby.AttachedTo != null) {
-                parentInternalId = GetOrCreateInternalId(moby.AttachedTo);
-                if (parentInternalId == 0) {
-                    Logger.Error($"Player({_clientHandler?.Moby().GUID()}) trying to attach a moby to a parent that does not exist: {moby.AttachedTo.GUID()}");
+        if (!mobyData.ClientCreated) {
+            if (now - mobyData.LastCreateSent >= CreateRetryTicks) {
+                ushort parentInternalId = 0;
+                if (moby.AttachedTo != null) {
+                    parentInternalId = GetOrCreateInternalId(moby.AttachedTo);
+                    if (parentInternalId == 0) {
+                        Logger.Error($"Player({_clientHandler?.Moby().GUID()}) trying to attach a moby to a parent that does not exist: {moby.AttachedTo.GUID()}");
+                    }
                 }
+
+                SendPacket(Packet.MakeCreateMobyPacket(internalId, moby, parentInternalId));
+                mobyData.LastCreateSent = now;
             }
-            
-            SendPacket(Packet.MakeCreateMobyPacket(internalId, moby, parentInternalId));
-            _mobys[internalId] = new MobyData { Id = moby.GUID(), LastUpdate = Game.Game.Shared().Ticks(), MobyRef = moby, ClientCreated = false };
+
+            _mobys[internalId] = mobyData with { LastUpdate = now };
             SendPacket(Packet.MakeMobyUpdatePacket(internalId, moby));
-            SendPacket(Packet.MakeMobyUpdateExtended(internalId, [new Packet.UpdateMobyValue(0x38, moby.Color.ToUInt())]));
+            SendColor(internalId, moby);
         
             return;
         }
 
-        _mobys[internalId] = new MobyData { Id = moby.GUID(), LastUpdate = Game.Game.Shared().Ticks(), MobyRef = moby, ClientCreated = true };
+        _mobys[internalId] = mobyData with { LastUpdate = now };
         SendPacket(Packet.MakeMobyUpdatePacket(internalId, moby));
+        SendColor(internalId, moby);
+    }
+
+    private void SendColor(ushort internalId, Moby moby) {
+        // With the mirroring mod a player's lighting is copied over from their own game. Sending a color would
+        //  overwrite it, so only game modes that color players on purpose do (players used to be tinted in a color
+        //  made from their username).
+        if (moby is Player { HasCustomColor: false } && SupportsMirroring) {
+            return;
+        }
+
         SendPacket(Packet.MakeMobyUpdateExtended(internalId, [new Packet.UpdateMobyValue(0x38, moby.Color.ToUInt())]));
     }
     
@@ -690,8 +721,9 @@ partial class Client {
             if (!_mobys.ContainsKey(i) && _lastDeletedId != i) {
                 SendPacket(Packet.MakeCreateMobyPacket(i, moby, parentInternalId));
                 
+                long now = Game.Game.Shared().Ticks();
                 _mobysTable[moby.GUID()] = i;
-                _mobys[i] = new MobyData { Id = moby.GUID(), LastUpdate = Game.Game.Shared().Ticks(), MobyRef = moby };
+                _mobys[i] = new MobyData { Id = moby.GUID(), LastUpdate = now, MobyRef = moby, LastCreateSent = now };
                 return i;
             }
         }
@@ -748,6 +780,18 @@ partial class Client {
 
     public bool HasMoby(Moby moby) {
         return _mobysTable.TryGetValue(moby.GUID(), out _);
+    }
+
+    /// <summary>
+    /// The ID this client's game knows the moby by, or 0 if the game hasn't confirmed it created the moby yet.
+    /// </summary>
+    public ushort GetCreatedInternalIdForMoby(Moby moby) {
+        if (_mobysTable.TryGetValue(moby.GUID(), out var internalId) &&
+            _mobys.TryGetValue(internalId, out var mobyData) && mobyData.ClientCreated) {
+            return internalId;
+        }
+
+        return 0;
     }
 
     public void CleanupStaleMobys() {

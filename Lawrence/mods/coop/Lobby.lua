@@ -142,6 +142,7 @@ function Lobby:Start()
     for i, player in ipairs(self.players) do
         print("  " .. player:Username())
         
+        player:CloseLobbyView()
         player:Start()
     end
 
@@ -155,7 +156,8 @@ function Lobby:Join(player)
     self.players:Add(player)
     self.universe:AddEntity(player)
     
-    player:AddEntity(LobbyView(player, self))
+    player.lobbyView = LobbyView(player, self)
+    player:AddEntity(player.lobbyView)
     
     self.inactiveTimer = 0
 end

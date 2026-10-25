@@ -81,8 +81,14 @@ public partial class Player : Moby {
 
     public override Color Color {
         get { return _color; }
-        set { base.Color = value; _client.SendPacket(Packet.MakeMobyUpdateExtended(0, [new Packet.UpdateMobyValue(0x38, this.Color.ToUInt())])); }
+        set { base.Color = value; HasCustomColor = true; }
     }
+
+    /// <summary>
+    /// Set when a game mode colors this player (e.g. hide and seek teams). Otherwise other players see them lit
+    ///  exactly like their own game lights them.
+    /// </summary>
+    public bool HasCustomColor { get; private set; }
 
     private ushort _state = 0;
     public ushort state {
@@ -112,8 +118,6 @@ public partial class Player : Moby {
     public Player(Client client) {
         _client = client;
         _client.SetHandler(this);
-        
-        GeneratePlayerColor();
 
         InitializeInternalLuaEntity();
         
@@ -153,29 +157,6 @@ public partial class Player : Moby {
         base.Delete();
     }
 
-    public void GeneratePlayerColor() {
-        // Generate player color based on username
-        if (_client.GetUsername() is not { } username) {
-            return;
-        }
-        
-        int hash = 0;
-        
-        for (int i = 0; i < username.Length; i++) {
-            hash = username[i] + ((hash << 5) - hash);
-        }
-        
-        int r = (hash >> 16) & 0xFF;
-        int g = (hash >> 8) & 0xFF;
-        int b = hash & 0xFF;
-        
-        Color = new Color {
-            R = (byte)r,
-            G = (byte)g,
-            B = (byte)b,
-            A = 255
-        };
-    }
 }
 
 #region Lua
@@ -483,34 +464,9 @@ partial class Player {
         
         List<Guid> updateMobys = new();
 
-        var visibleViews = visibilityGroup.Find<View>(this).ToList();
-        
-        // Views that are in _views and not in visibleViews should be deleted from the client.
-        foreach (var view in _views.ToList()) {
-            if (!visibleViews.Contains(view)) {
-                CloseView(view);
-            }
-        }
-        
-        foreach (var view in visibleViews) {
-            if (!_views.Contains(view)) {
-                ConfigureView(view);
-                
-                // We don't need to send an update the same frame as we're creating elements
-                continue;
-            }
-            
-            foreach (var viewElement in view.Elements()) {
-                if (viewElement == _nametagElement) {  // This is a little hacky
-                    continue;
-                }
-                
-                var packet = Packet.MakeUIItemPacket(viewElement, MPUIOperationFlag.Update);
-
-                if (packet != null) {
-                    SendPacket(packet);
-                }
-            }
+        // Wait for the client to clear its UI before drawing views again, see ResyncUI
+        if (!_uiResyncPending) {
+            UpdateViews(visibilityGroup);
         }
 
         // Nothing here for the player if they're not in a level yet.
@@ -544,8 +500,10 @@ partial class Player {
                 if (_client.HasMoby(moby)) continue;
             }
 
+            // Far away mobys get fewer updates, but not other players and what they're holding: at a reduced rate
+            //  their movement (jumps especially) looks choppy from anything more than a few steps away.
             float mobyDistance = DistanceTo(moby);
-            if (mobyDistance > 10) {
+            if (mobyDistance > 10 && moby is not Player && moby.SyncOwner == null) {
                 if (Game.Shared().Ticks() % (int)Math.Max(1, mobyDistance / 10) != 0) {
                     continue;
                 }
@@ -553,6 +511,38 @@ partial class Player {
             
             Update(moby);
             updateMobys.Add(moby.GUID());
+        }
+    }
+
+    private void UpdateViews(Entity visibilityGroup) {
+        var visibleViews = visibilityGroup.Find<View>(this).ToList();
+        
+        // Views that are in _views and not in visibleViews should be deleted from the client.
+        foreach (var view in _views.ToList()) {
+            if (!visibleViews.Contains(view)) {
+                CloseView(view);
+            }
+        }
+        
+        foreach (var view in visibleViews) {
+            if (!_views.Contains(view)) {
+                ConfigureView(view);
+                
+                // We don't need to send an update the same frame as we're creating elements
+                continue;
+            }
+            
+            foreach (var viewElement in view.Elements()) {
+                if (viewElement == _nametagElement) {  // This is a little hacky
+                    continue;
+                }
+                
+                var packet = Packet.MakeUIItemPacket(viewElement, MPUIOperationFlag.Update);
+
+                if (packet != null) {
+                    SendPacket(packet);
+                }
+            }
         }
     }
 
@@ -591,6 +581,50 @@ partial class Player {
 
     public void NotifyDelete(Moby entity) {
         _client.DeleteMoby(entity);
+    }
+
+    /// <summary>
+    /// Passes a packet from this player's game on to the other players on the same level whose mod understands it.
+    ///  The body starts with this player's ID, which the server swaps for the ID each receiving game knows this
+    ///  player by. Used for the pose snapshots (unreliable, 60 a second) and for hits and kills on the level's
+    ///  enemies and objects (reliable).
+    /// </summary>
+    public void RelayToLevel(MPPacketType type, byte[] body, bool reliable) {
+        if (_level == null || body.Length < 2) {
+            return;
+        }
+
+        foreach (var other in _level.Find<Player>().ToList()) {
+            if (other == this || !other._client.SupportsMirroring) {
+                continue;
+            }
+
+            ushort id = other._client.GetCreatedInternalIdForMoby(this);
+
+            // Hits and kills don't need to know who sent them, so they go through even before the other game has
+            //  this player's Ratchet. Pose snapshots have nothing to apply to without it.
+            if (id == 0 && !reliable) {
+                continue;
+            }
+
+            var copy = (byte[])body.Clone();
+            if (other._client.Endianness == Packet.Endianness.BigEndian) {
+                copy[0] = (byte)(id >> 8);
+                copy[1] = (byte)id;
+            } else {
+                copy[0] = (byte)id;
+                copy[1] = (byte)(id >> 8);
+            }
+
+            var header = new MPPacketHeader {
+                PacketType = type,
+                Size = (uint)copy.Length,
+                RequiresAck = (byte)(reliable ? 255 : 0),
+                AckCycle = (byte)(reliable ? 255 : 0)
+            };
+
+            other._client.SendPacket(header, copy);
+        }
     }
 
     /// <summary>
@@ -875,8 +909,6 @@ partial class Player : IClientHandler
         }
         
         CallLuaFunction("OnRespawned", LuaEntity());
-        
-        SendPacket(Packet.MakeMobyUpdateExtended(0, [new Packet.UpdateMobyValue(0x38, Color.ToUInt())]));
     }
 
     /// <summary>
@@ -887,6 +919,7 @@ partial class Player : IClientHandler
     public void GameStateChanged(GameState gameState) {
         if (GameState == GameState.Loading && gameState == GameState.PlayerControl) {
             RegisterHybridMobys();
+            ResyncUI();
         }
         
         GameState = gameState;
@@ -1058,6 +1091,7 @@ partial class Player {
     //  UI for views they can no longer see.
     private readonly Dictionary<View, View.OnClose> _viewCloseHandlers = new();
     private readonly Dictionary<ViewElement, Action> _elementUnsubscribers = new();
+    private bool _uiResyncPending = false;
 
     public void ConfigureView(View view) {
         _views.Add(view);
@@ -1127,8 +1161,16 @@ partial class Player {
                 continue;
             }
 
-            UnsubscribeElement(element);
             SendPacket(Packet.MakeUIItemPacket(element, MPUIOperationFlag.Delete));
+        }
+
+        DetachView(view);
+        _views.Remove(view);
+    }
+
+    private void DetachView(View view) {
+        foreach (var element in view.Elements()) {
+            UnsubscribeElement(element);
         }
 
         view.ElementAdded -= AddElement;
@@ -1136,8 +1178,22 @@ partial class Player {
         if (_viewCloseHandlers.Remove(view, out var closeHandler)) {
             view.Close -= closeHandler;
         }
+    }
 
-        _views.Remove(view);
+    /// <summary>
+    /// Clears all server UI on the client and draws what this player should see from scratch. The client only removes
+    ///  UI when told to, so a lost delete (e.g. the lobby browser's when joining a game) otherwise leaves a menu stuck
+    ///  on screen until the player reconnects.
+    /// </summary>
+    public void ResyncUI() {
+        foreach (var view in _views) {
+            DetachView(view);
+        }
+        _views.Clear();
+
+        // Views are drawn again only after the client has acked the clear, so new elements can't arrive before it
+        _uiResyncPending = true;
+        _client.SendPacket(Packet.MakeUIItemPacket(null, MPUIOperationFlag.ClearAll)!, () => _uiResyncPending = false);
     }
 
     /// <summary>

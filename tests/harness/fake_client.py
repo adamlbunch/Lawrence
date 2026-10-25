@@ -36,6 +36,12 @@ UI = 29
 UI_EVENT = 30
 OPEN_DATA_STREAM = 31
 UPLOAD_FILE = 32
+MOBY_CREATE_FAILURE = 28
+PLAYER_STATE = 34
+MOBY_HIT = 35
+MOBY_KILLED = 36
+
+CREATE_SUCCESS = 6
 
 FLAG_RPC = 1
 
@@ -72,14 +78,18 @@ CIRCLE = 32
 TRIANGLE = 16
 
 API_VERSION = 13
+API_VERSION_MIRRORING = 14
 
 # GameClient::update returns early without acking these while in a movie or loading, so the server resends them later
 DEFERRED_WHILE_BUSY = {MOBY_CREATE, MOBY_UPDATE, MOBY_EX, CHANGE_MOBY_VALUE, MOBY_DELETE, REGISTER_HYBRID_MOBY}
 
 
 class FakeClient:
-    def __init__(self, username, port, host='127.0.0.1'):
+    def __init__(self, username, port, host='127.0.0.1', api_version=API_VERSION, confirm_creates=False):
         self.username = username
+        self.api_version = api_version
+        self.confirm_creates = confirm_creates  # Confirm moby creates like the game does (GameClient::create_moby)
+        self.created = {}        # moby uuid -> oClass, of creates we confirmed
         self.user_id = random.randint(1, 2**31 - 1)
         self.addr = (host, port)
 
@@ -94,6 +104,7 @@ class FakeClient:
 
         self.game_state = PLAYER_CONTROL
         self.frozen = False      # Simulates a stalled client: incoming packets are neither processed nor acked
+        self.lose_ui_deletes = False  # Simulates UI delete packets that never arrive
         self.handshake = False
         self.received = []       # (type, body) of every processed (non-ack) packet, in order
         self.rpc_responses = {}  # (ack id, ack cycle) -> body
@@ -179,6 +190,10 @@ class FakeClient:
         if self.game_state in (MOVIE, LOADING) and packet_type in DEFERRED_WHILE_BUSY:
             return
 
+        # Hits and kills on the level's mobys wait until the player is back in control to be applied
+        if self.game_state != PLAYER_CONTROL and packet_type in (MOBY_HIT, MOBY_KILLED):
+            return
+
         self._process(packet_type, body)
 
         if requires_ack > 0:
@@ -187,6 +202,11 @@ class FakeClient:
 
     def _process(self, packet_type, body):
         self.received.append((packet_type, body))
+
+        if packet_type == MOBY_CREATE and self.confirm_creates and self.game_state == PLAYER_CONTROL:
+            uuid, _, _, _, o_class = struct.unpack_from('>HHBBH', body, 0)
+            self.created[uuid] = o_class
+            self.send(MOBY_CREATE_FAILURE, struct.pack('>HB', uuid, CREATE_SUCCESS), reliable=True)
 
         if packet_type == UI:
             self._process_ui(body)
@@ -243,7 +263,7 @@ class FakeClient:
         element_id, element_type, operations, items = struct.unpack_from('>HHBB', body, 0)
         if operations & UI_OP_CLEAR_ALL:
             self.ui_elements.clear()
-        if operations & UI_OP_DELETE:
+        if operations & UI_OP_DELETE and not self.lose_ui_deletes:
             self.ui_elements.pop(element_id, None)
 
         offset = 6
@@ -285,7 +305,7 @@ class FakeClient:
             time.sleep(0.1)
 
         name = self.username.encode()
-        key = self.send(CONNECT, struct.pack('>iI8sH', self.user_id, API_VERSION, b'\0' * 8, len(name)) + name,
+        key = self.send(CONNECT, struct.pack('>iI8sH', self.user_id, self.api_version, b'\0' * 8, len(name)) + name,
                         rpc=True)
         response = self.wait_for(lambda: self.rpc_responses.get(key), timeout, 'connect response')
         status, = struct.unpack('>i', response[:4])
@@ -329,6 +349,24 @@ class FakeClient:
 
     def respawn(self, level, spawn_id=1):
         self.send(PLAYER_RESPAWNED, struct.pack('>BH', spawn_id, level), reliable=True)
+
+    def move_to(self, x, y, z, animation=0):
+        """Sends this player's Ratchet position, like the game does every frame."""
+        body = struct.pack('>HHBBfffffff', 0, 0, animation, 0, x, y, z, 0.0, 0.0, 0.0, 1.0)
+        self.send(MOBY_UPDATE, body)
+
+    def send_player_state(self, frame, payload=b''):
+        """One part of a pose snapshot, like Mirror::send_snapshot. The server fills in the sender ID."""
+        self.send(PLAYER_STATE, struct.pack('>HBBIHH', 0, 0, 0, frame, 0, 0) + payload)
+
+    def send_hit(self, uid, o_class, damage):
+        body = struct.pack('>HHHBBHHIfI', 0, uid, o_class, 0, 0, 0, 0, 0x330000, damage, 0) + b'\0' * 32
+        self.send(MOBY_HIT, body, reliable=True)
+
+    def uuid_of(self, o_class):
+        """The moby uuid the server created here for a moby of this oClass."""
+        with self.lock:
+            return next((uuid for uuid, created_class in self.created.items() if created_class == o_class), None)
 
     def enter_level(self, level, spawn_id=1):
         self.set_game_state(LOADING)
@@ -395,6 +433,10 @@ class FakeClient:
                     count += 1
                 offset += length
         return count
+
+    def has_exact_text(self, text):
+        with self.lock:
+            return any(text_of(element['attrs'].get(ATTR_TEXT, b'')) == text for element in self.ui_elements.values())
 
     def error_messages(self):
         return [text_of(body) for body in self.packets(ERROR_MESSAGE)]

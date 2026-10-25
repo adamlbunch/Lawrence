@@ -120,6 +120,7 @@ public partial class Client {
         
         context.Client._username = username;
         context.Client._userid = connect.UserId;
+        context.Client.ApiVersion = connect.Version;
         
         context.RPCRespond([responseBody]);
         
@@ -304,6 +305,10 @@ public partial class Client {
             player?.OnStartInLevelMovie(state.Value, state.Offset);
         }
 
+        if (state.StateType == MPStateType.MP_STATE_UI_RESET) {
+            (player as Player)?.ResyncUI();
+        }
+
         if (state.StateType == MPStateType.MP_STATE_STANDING_ON_MOBY) {
             Moby? moby = null;
             if (state.Value > 0) {
@@ -312,6 +317,21 @@ public partial class Client {
             
             player?.OnPlayerStandingOnMoby(moby);
         }
+    }
+
+    [PacketHandler(MPPacketType.MP_PACKET_PLAYER_STATE)]
+    public static void HandlePlayerState(PacketContext context) {
+        (context.GetHandler() as Player)?.RelayToLevel(MPPacketType.MP_PACKET_PLAYER_STATE, context.Body, reliable: false);
+    }
+
+    [PacketHandler(MPPacketType.MP_PACKET_MOBY_HIT)]
+    public static void HandleMobyHit(PacketContext context) {
+        (context.GetHandler() as Player)?.RelayToLevel(MPPacketType.MP_PACKET_MOBY_HIT, context.Body, reliable: true);
+    }
+
+    [PacketHandler(MPPacketType.MP_PACKET_MOBY_KILLED)]
+    public static void HandleMobyKilled(PacketContext context) {
+        (context.GetHandler() as Player)?.RelayToLevel(MPPacketType.MP_PACKET_MOBY_KILLED, context.Body, reliable: true);
     }
 
     [PacketHandler(MPPacketType.MP_PACKET_CONTROLLER_INPUT)]

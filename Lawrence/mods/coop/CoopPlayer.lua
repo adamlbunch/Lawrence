@@ -70,6 +70,16 @@ function CoopPlayer:DeleteWorldMoby(oClass)
     end
 end
 
+-- Every player's lobby screen has to close when the game starts, not just the host's. Otherwise it stays on top of
+--  the guest's game, and its only way out (Triangle) leaves the lobby, so nothing syncs for them anymore.
+function CoopPlayer:CloseLobbyView()
+    if self.lobbyView ~= nil then
+        local view = self.lobbyView
+        self.lobbyView = nil
+        view:CloseView()
+    end
+end
+
 function CoopPlayer:Start()
     self.ingame = true
     self.ready = true
