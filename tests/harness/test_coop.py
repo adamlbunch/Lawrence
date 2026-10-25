@@ -354,6 +354,14 @@ class MirroringTests(CoopTestCase):
             self.assertEqual(sender, host_uuid)
             self.assertEqual(body[12:], payload)
 
+    def test_old_mod_is_told_to_update(self):
+        self.client_options['bravo'] = {}
+        new, old = self.client('alpha'), self.client('bravo')
+        old.wait_for(lambda: old.error_messages(), what='notice about the old mod')
+        self.assertIn('older than this server', old.error_messages()[0])
+        time.sleep(0.5)
+        self.assertEqual(new.error_messages(), [])
+
     def test_old_mod_gets_no_snapshots(self):
         self.client_options['bravo'] = {'confirm_creates': True}
         host, guest = self.start_game()

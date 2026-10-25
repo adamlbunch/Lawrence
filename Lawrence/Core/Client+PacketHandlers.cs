@@ -133,6 +133,12 @@ public partial class Client {
         
         context.Client.DataStreamKey = (uint)Guid.NewGuid().GetHashCode();
         context.Client.SendPacket(Packet.MakeOpenDataStreamPacket(context.Client.DataStreamKey.Value));
+
+        if (!context.Client.SupportsMirroring) {
+            context.Client.ShowErrorMessage("Your multiplayer mod is older than this server's co-op build. You can " +
+                                            "still play, but other players' moves and weapons, and hits on enemies, " +
+                                            "won't be in sync. Ask the host for the new mod.");
+        }
     }
 
     [PacketHandler(MPPacketType.MP_PACKET_TIME_SYNC, RequiresHandshake = false)]
