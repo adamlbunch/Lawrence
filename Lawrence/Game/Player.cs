@@ -136,7 +136,12 @@ public partial class Player : Moby {
         foreach (var label in _labels) {
             label?.Delete();
         }
-        
+
+        // Detach from views that outlive this player, like the level's, so they don't keep it in memory
+        foreach (var view in _views.ToList()) {
+            CloseView(view);
+        }
+
         // Clean all mobys this client has synced
         var mobys = Find<Moby>().ToArray();
         foreach (var moby in mobys) {
@@ -319,8 +324,8 @@ partial class Player {
     }
     
     public void SetLevelFlags(byte type, byte level, ushort index, uint[] value) {
-        for (int i = 0; i <= value.Length; i += 8) {
-            SendPacket(Packet.MakeSetLevelFlagPacket(type, level, index, value.Skip(i).Take(8).ToArray()));
+        for (int i = 0; i < value.Length; i += 8) {
+            SendPacket(Packet.MakeSetLevelFlagPacket(type, level, (ushort)(index + i), value.Skip(i).Take(8).ToArray()));
         }
     }
 
@@ -365,20 +370,24 @@ partial class Player {
         SendPacket(Packet.MakeLevelConfigurationPacket((byte)level.GameID(), level.LevelConfigurationOptions));
     }
 
+    /// <summary>
+    /// Sends the level flags other players have changed in this level, e.g. when this player is heading there.
+    /// </summary>
     public void SetLevelFlags(Level level) {
-        List<uint> levelFlags1 = new();
-        List<uint> levelFlags2 = new();
-        
-        foreach (var flag in level.LevelFlags1) {
-            levelFlags1.Add(flag);
+        if (!level.ShouldPropagateLevelFlags) {
+            return;
         }
-        
-        foreach (var flag in level.LevelFlags2) {
-            levelFlags2.Add(flag);
+
+        SendChangedLevelFlags(1, level, level.ChangedLevelFlags1, level.LevelFlags1);
+        SendChangedLevelFlags(2, level, level.ChangedLevelFlags2, level.LevelFlags2);
+    }
+
+    private void SendChangedLevelFlags(byte type, Level level, SortedSet<ushort> changed, byte[] flags) {
+        var changedFlags = changed.Select(index => (index, (uint)flags[index])).ToList();
+
+        for (int i = 0; i < changedFlags.Count; i += 8) {
+            SendPacket(Packet.MakeSetLevelFlagPacket(type, (byte)level.GameID(), changedFlags.Skip(i).Take(8).ToList()));
         }
-        
-        SetLevelFlags(1, (byte)level.GameID(), 0, levelFlags1.ToArray());
-        SetLevelFlags(2, (byte)level.GameID(), 0, levelFlags2.ToArray());
     }
 
     public void MonitorAddress(uint address, byte size, bool isFloat = false, Action<object>? callback = null) {
@@ -1044,12 +1053,20 @@ partial class Player {
 
     private List<View> _views = new();
 
+    // Handlers we've attached to views and elements, so CloseView can detach them again. Views like a level's can
+    //  outlive this player's visit, and leftover handlers would pile up on every revisit and keep sending this player
+    //  UI for views they can no longer see.
+    private readonly Dictionary<View, View.OnClose> _viewCloseHandlers = new();
+    private readonly Dictionary<ViewElement, Action> _elementUnsubscribers = new();
+
     public void ConfigureView(View view) {
         _views.Add(view);
-        
-        view.Close += () => {
+
+        View.OnClose closeHandler = () => {
             CloseView(view);
         };
+        _viewCloseHandlers[view] = closeHandler;
+        view.Close += closeHandler;
 
         view.ElementAdded += AddElement;
         view.ElementRemoved += RemoveElement;
@@ -1066,18 +1083,24 @@ partial class Player {
             return;
         }
         
+        UnsubscribeElement(element);
+
         if (element is ListMenuElement listMenu) {
-            listMenu.MakeFocusedDelegate += () => {
+            ListMenuElement.MakeFocused makeFocused = () => {
                 SendPacket(Packet.MakeUIEventPacket(MPUIElementEventType.MPUIElementEventTypeMakeFocused, element));
             };
+            listMenu.MakeFocusedDelegate += makeFocused;
+            _elementUnsubscribers[element] = () => listMenu.MakeFocusedDelegate -= makeFocused;
         }
 
         if (element is InputElement inputElement) {
-            inputElement.ActivateDelegate += () => {
+            InputElement.OnActivate activate = () => {
                 SendPacket(Packet.MakeUIEventPacket(MPUIElementEventType.MPUIElementEventTypeActivate, element));
             };
+            inputElement.ActivateDelegate += activate;
+            _elementUnsubscribers[element] = () => inputElement.ActivateDelegate -= activate;
         }
-            
+
         // FIXME: We want the first packet we send to include the ClearAll flag, but not subsequent ones. 
         //      Since we send UDP, it's possible that the client receives the packets out of order.
         SendPacket(Packet.MakeUIItemPacket(element, MPUIOperationFlag.Create));
@@ -1087,8 +1110,15 @@ partial class Player {
         if (element == _nametagElement) {  // This is a little hacky
             return;
         }
-        
+
+        UnsubscribeElement(element);
         SendPacket(Packet.MakeUIItemPacket(element, MPUIOperationFlag.Delete));
+    }
+
+    void UnsubscribeElement(ViewElement element) {
+        if (_elementUnsubscribers.Remove(element, out var unsubscribe)) {
+            unsubscribe();
+        }
     }
 
     public void CloseView(View view) {
@@ -1096,8 +1126,15 @@ partial class Player {
             if (element == _nametagElement) {  // This is a little hacky
                 continue;
             }
-            
+
+            UnsubscribeElement(element);
             SendPacket(Packet.MakeUIItemPacket(element, MPUIOperationFlag.Delete));
+        }
+
+        view.ElementAdded -= AddElement;
+        view.ElementRemoved -= RemoveElement;
+        if (_viewCloseHandlers.Remove(view, out var closeHandler)) {
+            view.Close -= closeHandler;
         }
 
         _views.Remove(view);

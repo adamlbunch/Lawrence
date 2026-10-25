@@ -14,7 +14,8 @@ function CoopPlayer:Made()
     self.clanky = null
     
     self.gameState = 0
-    
+    self.pendingMobyDeletions = {}
+
     self.skillpointCounters = {
         Player.offset.aridiaShipsKilled,
         Player.offset.eudoraShipsKilled,
@@ -36,7 +37,14 @@ function CoopPlayer:Made()
     self:MonitorAddress(0x96BF88, 4)
     
     self:EnableManualSaveLoad()
-    
+
+    -- Let the game unlock planets right away instead of waiting for the server to echo the unlock back. Scripted
+    --  sequences that check the unlock straight after (likely Gemlik's bridges after the Qwark fight) would otherwise
+    --  run before the echo arrives. The game still reports unlocks, so they're shared with the other player as before.
+    self:SetCommunicationFlags(Player.communicationFlags.ENABLE_ON_UNLOCK_ITEM |
+            Player.communicationFlags.ENABLE_ON_PICKUP_GOLD_BOLT |
+            Player.communicationFlags.ENABLE_ON_GET_BOLTS)
+
     self.saveMessageCountdown = 0
     
     self.respawnsThisLevel = 0
@@ -52,6 +60,16 @@ function CoopPlayer:Save()
     end
 end
 
+-- Deleting an NPC or item while this player is watching a cutscene that uses it freezes their game (e.g. one player
+--  skipping the Plumber cutscene while the other is still in it). Deletions wait until the player is back in control.
+function CoopPlayer:DeleteWorldMoby(oClass)
+    if self.gameState == GameState.PlayerControl then
+        self:DeleteAllChildrenWithOClass(oClass)
+    else
+        table.insert(self.pendingMobyDeletions, oClass)
+    end
+end
+
 function CoopPlayer:Start()
     self.ingame = true
     self.ready = true
@@ -61,7 +79,7 @@ function CoopPlayer:Start()
         self:AddEntity(self.debugView)
     end
 
-    if not self.lobby.started then
+    if not self.lobby.started and not self.lobby.resumed then
         self:LoadLevel(self.lobby.options.startPlanet.value)
     else
        -- Try to load an existing save file if it exists.
@@ -238,6 +256,18 @@ function CoopPlayer:OnGameStateChanged(state)
 
     if state == 6 then
         self.allowRespawn = true
+
+        -- Pending deletions were for the level we're leaving
+        self.pendingMobyDeletions = {}
+    end
+
+    if state == GameState.PlayerControl and #self.pendingMobyDeletions > 0 then
+        local pending = self.pendingMobyDeletions
+        self.pendingMobyDeletions = {}
+
+        for _, oClass in ipairs(pending) do
+            self:DeleteAllChildrenWithOClass(oClass)
+        end
     end
 end
 
@@ -295,34 +325,34 @@ function CoopPlayer:OnUnlockItem(item_id, equip)
 
             if player:Level() == self:Level() then
                 if item.name == "Swingshot" then
-                    player:DeleteAllChildrenWithOClass(890)  -- Delete Helga
+                    player:DeleteWorldMoby(890)  -- Delete Helga
                 end
                 if item.name == "Suck Cannon" then
-                    player:DeleteAllChildrenWithOClass(1120)  -- Delete Suck Cannon
+                    player:DeleteWorldMoby(1120)  -- Delete Suck Cannon
                 end
                 if item.name == "Grindboots" then
-                    player:DeleteAllChildrenWithOClass(1190)  -- Delete Fred
+                    player:DeleteWorldMoby(1190)  -- Delete Fred
                 end
                 if item.name == "Trespasser" then
-                    player:DeleteAllChildrenWithOClass(1005)  -- Delete Trespasser
+                    player:DeleteWorldMoby(1005)  -- Delete Trespasser
                 end
                 if item.name == "Hydrodisplacer" then
-                    player:DeleteAllChildrenWithOClass(1016)  -- Delete Hydrodisplacer
+                    player:DeleteWorldMoby(1016)  -- Delete Hydrodisplacer
                 end
                 if item.name == "Metal Detector" then
-                    player:DeleteAllChildrenWithOClass(1283)  -- Delete Plumber
+                    player:DeleteWorldMoby(1283)  -- Delete Plumber
                 end
                 if item.name == "Pilot's Helmet" then
-                    player:DeleteAllChildrenWithOClass(1290)  -- Delete Pilot's Helmet
+                    player:DeleteWorldMoby(1290)  -- Delete Pilot's Helmet
                 end
                 if item.name == "Magneboots" then
-                    player:DeleteAllChildrenWithOClass(18)  -- Delete Magneboots
+                    player:DeleteWorldMoby(18)  -- Delete Magneboots
                 end
                 if item.name == "Morph-o-Ray" then
-                    player:DeleteAllChildrenWithOClass(1354)  -- Delete Morph-o-Ray
+                    player:DeleteWorldMoby(1354)  -- Delete Morph-o-Ray
                 end
                 if item.name == "Codebot" then
-                    player:DeleteAllChildrenWithOClass(1428)  -- Delete Codebot
+                    player:DeleteWorldMoby(1428)  -- Delete Codebot
                 end
             end
         end
@@ -340,25 +370,25 @@ function CoopPlayer:OnUnlockLevel(level)
 
         if player:Level() == self:Level() then
             if level == 2 then  -- Aridia
-                player:DeleteAllChildrenWithOClass(774)  -- Delete Plumber
+                player:DeleteWorldMoby(774)  -- Delete Plumber
             end
             if level == 6 then  -- Blarg
-                player:DeleteAllChildrenWithOClass(1190)  -- Delete Lietuenant
+                player:DeleteWorldMoby(1190)  -- Delete Lietuenant
             end
             if level == 5 then  -- Rilgar
-                player:DeleteAllChildrenWithOClass(750)  -- Delete infobot
+                player:DeleteWorldMoby(750)  -- Delete infobot
             end
             if level == 7 then  -- Umbris
-                player:DeleteAllChildrenWithOClass(919)  -- Delete Bouncer
+                player:DeleteWorldMoby(919)  -- Delete Bouncer
             end
             if level == 8 then  -- Batalia
-                player:DeleteAllChildrenWithOClass(750)  -- Delete infobot
+                player:DeleteWorldMoby(750)  -- Delete infobot
             end
             if level == 9 then  -- Gaspar
-                player:DeleteAllChildrenWithOClass(1144)  -- Delete Deserter
+                player:DeleteWorldMoby(1144)  -- Delete Deserter
             end
             if level == 10 then  -- Orxon
-                player:DeleteAllChildrenWithOClass(1130)  -- Delete Commando
+                player:DeleteWorldMoby(1130)  -- Delete Commando
             end
         end
     end
@@ -382,7 +412,7 @@ end
 
 function CoopPlayer:OnGiveBolts(boltDiff, totalBolts)
     self.totalBolts = totalBolts
-    self.lobby.bolts = totalBolts
+    self.lobby:BoltsChanged(totalBolts)
     for _, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
         if player ~= self then
             player:GiveBolts(boltDiff)
@@ -392,7 +422,7 @@ end
 
 function CoopPlayer:OnDisconnect()
     if self.lobby ~= null then
-        self.lobby:Leave(self)
+        self.lobby:Leave(self, true)
     end
 end
 

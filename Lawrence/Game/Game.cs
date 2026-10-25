@@ -502,6 +502,64 @@ public class Game {
         _universes.Remove(universe);
     }
 
+    /// <summary>
+    /// Writes text to a file relative to the server folder, creating folders as needed. The file is replaced
+    ///  atomically so a crash mid-write doesn't corrupt the previous version.
+    /// </summary>
+    public bool WriteTextFile(string path, string text) {
+        return WriteFileAtomically(path, System.Text.Encoding.UTF8.GetBytes(text));
+    }
+
+    public string? ReadTextFile(string path) {
+        return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null;
+    }
+
+    /// <summary>
+    /// Writes a file received from a player (e.g. a save file) to disk, see <see cref="WriteTextFile"/>.
+    /// </summary>
+    public bool WriteDataFile(string path, Client.File file) {
+        return WriteFileAtomically(path, file.Data.ToArray());
+    }
+
+    public Client.File? ReadDataFile(string path) {
+        if (!System.IO.File.Exists(path)) {
+            return null;
+        }
+
+        return new Client.File(MPFileType.MPFileTypeSaveFile, System.IO.File.ReadAllBytes(path).ToList());
+    }
+
+    public bool MoveDirectory(string from, string to) {
+        try {
+            if (!Directory.Exists(from)) {
+                return false;
+            }
+
+            Directory.Move(from, to);
+            return true;
+        } catch (Exception e) {
+            Logger.Error($"Failed to move {from} to {to}", e);
+            return false;
+        }
+    }
+
+    private static bool WriteFileAtomically(string path, byte[] data) {
+        try {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+            if (directory != null) {
+                Directory.CreateDirectory(directory);
+            }
+
+            var temporaryPath = path + ".tmp";
+            System.IO.File.WriteAllBytes(temporaryPath, data);
+            System.IO.File.Move(temporaryPath, path, true);
+            return true;
+        } catch (Exception e) {
+            Logger.Error($"Failed to write {path}", e);
+            return false;
+        }
+    }
+
     public int PlayerCount()
     {
         int players = 0;

@@ -93,8 +93,9 @@ public partial class Client {
             
             context.RPCRespond([connectResponse]);
             context.Client.Disconnect();
+            return;
         }
-        
+
         foreach (Client c in context.Client._server.Clients()) {
             if (c != context.Client && c.GetUsername() == username) {
                 if (c.GetUserid() == connect.UserId && c.GetEndpoint().Address.Equals(context.Client.GetEndpoint().Address)) {
@@ -234,6 +235,10 @@ public partial class Client {
         var moby = client.GetSyncMobyByInternalId((ushort)delete.Uuid);
         if (moby != null) {
             context.GetHandler()?.DeleteMoby(moby);
+
+            // Free the ID too. Leaving it taken means a player runs out of IDs after 4096 attachments over a session
+            //  and their new weapons, helmets etc. stop showing up for others.
+            client.DeleteSyncMoby(moby);
         } else {
             Logger.Error($"Player [{client.ID}] tried to delete a moby that doesn't exist in its moby table.");
         }

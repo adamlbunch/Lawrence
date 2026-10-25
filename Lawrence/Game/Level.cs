@@ -13,6 +13,11 @@ public class Level : Entity {
     
     public byte[] LevelFlags1 = new byte[0x10];
     public byte[] LevelFlags2 = new byte[0x100];
+
+    // Flags players have changed while on this server. Only these are sent to players entering the level: the rest of
+    //  the arrays are unknown to us, and sending them would overwrite the flags from the player's own save.
+    public readonly SortedSet<ushort> ChangedLevelFlags1 = new();
+    public readonly SortedSet<ushort> ChangedLevelFlags2 = new();
     
     private List<Moby> _hybridMobys = new();
     
@@ -186,6 +191,7 @@ public class Level : Entity {
                 }
                 
                 LevelFlags1[index] = (byte)value;
+                ChangedLevelFlags1.Add(index);
                 break;
             case 2:
                 if (index >= LevelFlags2.Length) {
@@ -193,6 +199,7 @@ public class Level : Entity {
                     return;
                 }
                 LevelFlags2[index] = (byte)value;
+                ChangedLevelFlags2.Add(index);
                 break;
             default:
                 Logger.Error($"Unknown level flag type: {type}");

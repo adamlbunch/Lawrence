@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -87,6 +88,11 @@ public partial class Client {
     public readonly AckedMetadata[] Acked = new AckedMetadata[256];
     private readonly List<AckedMetadata> _unacked = new();
 
+    // Ack IDs run 1-254 per cycle, so the window must stay well below that for IDs to be unique among unacked packets
+    private const int MaxUnackedInFlight = 192;
+    private const int MaxPendingReliable = 16384;
+    private readonly Queue<(MPPacketHeader Header, byte[]? Body, Action? AckCallback)> _pendingReliable = new();
+
     private readonly Server _server;
     public Server Server => _server;
     
@@ -154,6 +160,26 @@ public partial class Client {
     private const int BufferSize = 1024;
 
     public void SendPacket(MPPacketHeader packetHeader, byte[]? packetBody, Action? ackCallback = null) {
+        bool needsAckId = packetHeader.PacketType != MPPacketType.MP_PACKET_ACK &&
+                          packetHeader.RequiresAck == 255 && packetHeader.AckCycle == 255;
+
+        // Clients don't ack some packets while in a movie or loading screen, so unacked packets can pile up. Instead of
+        //  letting ack IDs wrap around (making the client drop or double-process packets), reliable packets past the
+        //  window wait here in order until acks free up room.
+        if (needsAckId && (_pendingReliable.Count > 0 || _unacked.Count >= MaxUnackedInFlight)) {
+            if (_pendingReliable.Count >= MaxPendingReliable) {
+                Logger.Error($"Player({ID}) has {_pendingReliable.Count} reliable packets waiting to be sent. Dropping packet.");
+                return;
+            }
+
+            _pendingReliable.Enqueue((packetHeader, packetBody, ackCallback));
+            return;
+        }
+
+        SendPacketNow(packetHeader, packetBody, ackCallback);
+    }
+
+    private void SendPacketNow(MPPacketHeader packetHeader, byte[]? packetBody, Action? ackCallback) {
         packetHeader.TimeSent = (long)Server.Time();
 
         var bodyLen = 0;
@@ -186,11 +212,6 @@ public partial class Client {
 
         // Cache unacked request packets
         if (packetHeader.PacketType != MPPacketType.MP_PACKET_ACK && packetHeader.RequiresAck != 0) {
-            if (_unacked.Count >= 256) {
-                //Console.WriteLine($"Player {ID} has more than 256 unacked packets. We should probably boot this client.");
-                _unacked.Clear();
-            }
-
             _unacked.Add(new AckedMetadata {
                 Packet = packet, 
                 AckIndex = packetHeader.RequiresAck, 
@@ -315,18 +336,22 @@ public partial class Client {
         // We send a lot of duplicate packets and we should be able to endure
         // any packet loss. So this should help us not process a bunch of redundant packets.
         if (_lastHashes.Count >= 10) {
-            _lastHashes.Remove(0);
+            // Forget hashes that are too old to matter, otherwise this grows by every packet the client ever sends
+            foreach (var hash in _lastHashes.Where(entry => entry.Value <= timeNow - 200).Select(entry => entry.Key).ToList()) {
+                _lastHashes.Remove(hash);
+            }
         }
 
         _lastHashes[currentHash] = timeNow;
 
+        // Swapping the buffer outside the lock could race with the game thread draining it
         _recvLock.WaitOne();
         _recvBuffer.Add(data);
-        _recvLock.ReleaseMutex();
 
         if (_recvBuffer.Count > 399) {
             _recvBuffer = new List<byte[]>(400);
         }
+        _recvLock.ReleaseMutex();
     }
 
     private List<byte[]>? DrainPackets() {
@@ -380,6 +405,12 @@ public partial class Client {
             }
         }
 
+        // Acks processed above may have made room for reliable packets that are waiting
+        while (_pendingReliable.Count > 0 && _unacked.Count < MaxUnackedInFlight) {
+            var (header, body, ackCallback) = _pendingReliable.Dequeue();
+            SendPacketNow(header, body, ackCallback);
+        }
+
         // Resend unacked packets
         int index = 0;
         long timeNow = ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeSeconds();
@@ -415,6 +446,9 @@ public partial class Client {
         // Send a disconnect packet. Don't really care if they receive it.
         SendPacket(Packet.MakeDisconnectPacket());
         _disconnected = true;
+
+        _pendingReliable.Clear();
+        _unacked.Clear();
     }
 
     public void ShowErrorMessage(string message) {
@@ -446,90 +480,87 @@ partial class Client {
         _tcpClient = tcpClient;
     }
 
+    // Files are sent from background tasks; two sends to the same client at once would interleave on the stream
+    private readonly object _sendFileLock = new();
+
+    // Larger than any save file, but stops a corrupt header from making us allocate gigabytes
+    private const uint MaxDataStreamPayload = 64 * 1024 * 1024;
+
     public void SendFile(File file) {
         Task.Run(() => {
-            if (_tcpClient == null) {
-                return;
-            }
-
-            try {
-
-                Logger.Log($"Sending file {file.FileType} with {file.Data.Count / 1024}KB to {GetUsername()}");
-
-                var packet = Packet.MakeFileUploadPacket(file.FileType, (uint)file.Data.Count);
-
-                var (header, body) = packet.GetBytes(_endianness);
-
-                var bytes = new List<byte>();
-                bytes.AddRange(Packet.StructToBytes(header, _endianness));
-                bytes.AddRange(body);
-
-                _tcpClient.Client.Send(bytes.ToArray());
-
-                int sent = 0;
-
-                while (sent < file.Data.Count) {
-                    int chunkSize = 4096;
-                    if (chunkSize > file.Data.Count - sent) {
-                        chunkSize = file.Data.Count - sent;
-                    }
-
-                    sent += _tcpClient.Client.Send(file.Data.Skip(sent).Take(chunkSize).ToArray());
+            lock (_sendFileLock) {
+                if (_tcpClient is not { } tcpClient) {
+                    return;
                 }
 
-                Logger.Log($"Sent {file.Data.Count / 1024}KB to {GetUsername()}");
-            } catch (SocketException e) {
-                _disconnected = true;
-                _tcpClient.Close();
+                try {
+                    Logger.Log($"Sending file {file.FileType} with {file.Data.Count / 1024}KB to {GetUsername()}");
+
+                    var packet = Packet.MakeFileUploadPacket(file.FileType, (uint)file.Data.Count);
+
+                    var (header, body) = packet.GetBytes(_endianness);
+
+                    var bytes = new List<byte>();
+                    bytes.AddRange(Packet.StructToBytes(header, _endianness));
+                    bytes.AddRange(body);
+                    bytes.AddRange(file.Data);
+
+                    var stream = tcpClient.GetStream();
+                    stream.Write(bytes.ToArray());
+                    stream.Flush();
+
+                    Logger.Log($"Sent {file.Data.Count / 1024}KB to {GetUsername()}");
+                } catch (Exception e) when (e is SocketException or IOException or ObjectDisposedException) {
+                    // Only the file stream is broken. Marking the whole client as disconnected from here would skip
+                    //  the disconnect handling and leave a ghost player behind in the game.
+                    Logger.Error($"Failed to send file to {GetUsername()}", e);
+                    tcpClient.Close();
+                    _tcpClient = null;
+                }
             }
         });
     }
 
     public async Task ReceiveFromDataStream() {
-        if (_tcpClient == null) {
+        if (_tcpClient is not { } tcpClient) {
             return;
         }
 
-        while (!_disconnected) {
-            var packetHeader = new byte[Marshal.SizeOf<MPPacketHeader>()];
-            if (await _tcpClient.Client.ReceiveAsync(packetHeader) > 0 && Packet.MakeHeader(packetHeader) is {} header) {
-                var bodyBytes = new byte[header.Size];
-                if (await _tcpClient.Client.ReceiveAsync(bodyBytes) < 0) {
-                    continue;
+        var stream = tcpClient.GetStream();
+
+        try {
+            while (!_disconnected) {
+                // TCP can split a message anywhere, so every read has to wait for the full length
+                var packetHeader = new byte[Marshal.SizeOf<MPPacketHeader>()];
+                await stream.ReadExactlyAsync(packetHeader);
+
+                if (Packet.MakeHeader(packetHeader) is not { } header || header.Size > MaxDataStreamPayload) {
+                    Logger.Error($"{GetUsername()} sent an invalid header over TCP.");
+                    break;
                 }
+
+                var bodyBytes = new byte[header.Size];
+                await stream.ReadExactlyAsync(bodyBytes);
 
                 switch (header.PacketType) {
                     case MPPacketType.MP_PACKET_UPLOAD_FILE: {
-                        if (Packet.BytesToStruct<MPPacketFileUpload>(bodyBytes, _endianness) is not { } fileUpload) {
-                            continue;
+                        if (Packet.BytesToStruct<MPPacketFileUpload>(bodyBytes, _endianness) is not { } fileUpload ||
+                            fileUpload.FileSize > MaxDataStreamPayload) {
+                            Logger.Error($"{GetUsername()} sent an invalid file upload over TCP.");
+                            return;
                         }
-                        
-                        Logger.Log($"Receiving {fileUpload.FileSize/1024}KB file from {GetUsername()}");
+
+                        Logger.Log($"Receiving {fileUpload.FileSize / 1024}KB file from {GetUsername()}");
 
                         var file = new byte[fileUpload.FileSize];
-                        var received = 0;
-                        var chunk = 4096;
-
-                        do {
-                            if (chunk > fileUpload.FileSize - received) {
-                                chunk = (int)(fileUpload.FileSize - received);
-                            }
-
-                            var chunkArray = new byte[chunk];
-                            
-                            var r = await _tcpClient.Client.ReceiveAsync(chunkArray);
-                            
-                            Array.Copy(chunkArray, 0, file, received, r);
-
-                            received += r;
-                        } while (received < fileUpload.FileSize);
+                        await stream.ReadExactlyAsync(file);
 
                         _downloadedFile = file.ToList();
                         _downloadedFileType = fileUpload.FileType;
                         _downloadedFileReady = true;
-                        
-                        Logger.Log("File received maybe successfully!");
-                        
+
+                        Logger.Log($"Received {fileUpload.FileSize / 1024}KB file from {GetUsername()}");
+
                         break;
                     }
                     default: {
@@ -538,10 +569,12 @@ partial class Client {
                     }
                 }
             }
+        } catch (Exception e) when (e is EndOfStreamException or IOException or SocketException or ObjectDisposedException) {
+            // The game closed the stream (quit, crashed or lost connection)
+        } finally {
+            Logger.Log($"Closing data stream for {GetUsername()}");
+            tcpClient.Close();
         }
-
-        Logger.Log($"Closing data stream for {GetUsername()}");
-        _tcpClient.Close();
     }
 }
 

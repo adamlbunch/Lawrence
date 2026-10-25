@@ -47,6 +47,13 @@ public class Server {
         IPEndPoint ipep = new IPEndPoint(IPAddress.Parse(listenAddress), port);
         _udpServer = new UdpClient(ipep);
         _tcpListener = new TcpListener(ipep);
+
+        // On Windows, the "port unreachable" reply to a packet sent to a player whose game has closed makes the next
+        //  Receive throw. That would happen for every packet until the player times out, so turn it off.
+        if (OperatingSystem.IsWindows()) {
+            const int SIO_UDP_CONNRESET = -1744830452;
+            _udpServer.Client.IOControl(SIO_UDP_CONNRESET, [0, 0, 0, 0], null);
+        }
         Pipeline = new PacketPipeline(_middlewares);
         _serverName = serverName;
         _maxPlayers = maxPlayers;
@@ -217,26 +224,34 @@ public class Server {
             TimeSpan timeSinceEpoch = DateTimeOffset.UtcNow - unixEpoch;
             _time = (ulong)timeSinceEpoch.TotalMilliseconds;
             
-            _clientMutex.WaitOne();
-                
-            // Clients that are waiting to connect aren't part of a `Player` tick loop so the Client tick 
-            //   isn't being called. Therefore we call the Tick function here if it's waiting to connect, so
-            //   packets can be processed like they should on the right thread. 
-            foreach (Client client in _clients) {
-                if (client.WaitingToConnect) {
-                    if (client.GetInactiveSeconds() > 10) {
-                        client.Disconnect();
-                        continue;
+            // An exception escaping here would end the game loop and stop the server for everyone, so log it and
+            //  carry on with the next tick instead.
+            try {
+                _clientMutex.WaitOne();
+
+                try {
+                    // Clients that are waiting to connect aren't part of a `Player` tick loop so the Client tick
+                    //   isn't being called. Therefore we call the Tick function here if it's waiting to connect, so
+                    //   packets can be processed like they should on the right thread.
+                    foreach (Client client in _clients) {
+                        if (client.WaitingToConnect) {
+                            if (client.GetInactiveSeconds() > 10) {
+                                client.Disconnect();
+                                continue;
+                            }
+
+                            client.Tick();
+                        }
                     }
-                    
-                    client.Tick();
+                } finally {
+                    _clientMutex.ReleaseMutex();
                 }
-            }
-                
-            _clientMutex.ReleaseMutex();
-            
-            if (_processTicks) {
-                Tick();
+
+                if (_processTicks) {
+                    Tick();
+                }
+            } catch (Exception exception) {
+                Logger.Error("Unhandled exception in game tick", exception);
             }
             
             watch.Stop();
