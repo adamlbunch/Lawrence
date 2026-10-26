@@ -48,6 +48,12 @@ public class Server {
         _udpServer = new UdpClient(ipep);
         _tcpListener = new TcpListener(ipep);
 
+        // Every player's game sends dozens of packets a frame (its pose, the enemies and moving things it runs, sounds,
+        //  effects), and they arrive in bursts. With the system's default socket buffers, a burst that came in while
+        //  we were busy relaying the last one could overflow them and be lost.
+        _udpServer.Client.ReceiveBufferSize = 4 * 1024 * 1024;
+        _udpServer.Client.SendBufferSize = 4 * 1024 * 1024;
+
         // On Windows, the "port unreachable" reply to a packet sent to a player whose game has closed makes the next
         //  Receive throw. That would happen for every packet until the player times out, so turn it off.
         if (OperatingSystem.IsWindows()) {
