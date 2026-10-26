@@ -15,6 +15,14 @@ public class PacketRouter(Client client) {
         PacketHandler? handler;
         PacketHandlers.TryGetValue(header.PacketType, out handler);
 
+        if (handler is null && header.PacketType >= MPPacketType.MP_PACKET_RELAY_FIRST &&
+            header.PacketType <= MPPacketType.MP_PACKET_RELAY_LAST) {
+            (client.ClientHandler as global::Lawrence.Game.Player)?.RelayToLevel(header.PacketType, body,
+                reliable: header.RequiresAck != 0,
+                minimumVersion: Client.API_VERSION_ENEMY_SYNC);
+            return;
+        }
+
         if (handler is null) {
             Logger.Error(
                 $"(Player {client.ID}) sent unknown (possibly malformed) packet {header.PacketType} with size: {header.Size}.");

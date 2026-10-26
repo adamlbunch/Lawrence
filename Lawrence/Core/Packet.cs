@@ -49,6 +49,12 @@ public enum MPPacketType : ushort
     MP_PACKET_PLAYER_STATE = 34,    // A player's exact pose and attachments for one frame, relayed to the others
     MP_PACKET_MOBY_HIT = 35,        // A player hit an enemy or object of the level, relayed so the others apply it too
     MP_PACKET_MOBY_KILLED = 36,     // An enemy or object of the level a player hit is gone
+    MP_PACKET_ENEMY_STATE = 37,     // The enemies a player's game runs for everyone, relayed to the others
+
+    // Packets in this range are passed on as they are to the other players on the same level whose mod has the
+    //  enemy sync (API version 15), for the mod's own syncing. The server doesn't need to know them.
+    MP_PACKET_RELAY_FIRST = 38,
+    MP_PACKET_RELAY_LAST = 63,
 }
 
 public enum MPStateType : ushort

@@ -79,6 +79,7 @@ TRIANGLE = 16
 
 API_VERSION = 13
 API_VERSION_MIRRORING = 14
+API_VERSION_ENEMY_SYNC = 15
 
 # GameClient::update returns early without acking these while in a movie or loading, so the server resends them later
 DEFERRED_WHILE_BUSY = {MOBY_CREATE, MOBY_UPDATE, MOBY_EX, CHANGE_MOBY_VALUE, MOBY_DELETE, REGISTER_HYBRID_MOBY}

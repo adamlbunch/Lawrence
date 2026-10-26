@@ -53,15 +53,19 @@ public interface IClientHandler {
 
 public partial class Client {
     // Which API version we're currently on and which is the minimum version we support. 
-    private static uint API_VERSION = 14;
+    private static uint API_VERSION = 15;
     private static uint API_VERSION_MIN = 13;
 
     // Version 14 streams each player's exact pose and attachments and shares hits on enemies. Older mods still
     //  connect, they just don't get any of that.
     public const uint API_VERSION_MIRRORING = 14;
 
+    // Version 15 has each enemy run by one player's game, which streams it to the others
+    public const uint API_VERSION_ENEMY_SYNC = 15;
+
     public uint ApiVersion { get; private set; } = 13;
     public bool SupportsMirroring => ApiVersion >= API_VERSION_MIRRORING;
+    public bool SupportsEnemySync => ApiVersion >= API_VERSION_ENEMY_SYNC;
     
     /// <summary>
     /// When true, this client is waiting to connect, and is not yet part of the regular OnTick loop

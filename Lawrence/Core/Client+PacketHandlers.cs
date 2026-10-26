@@ -138,6 +138,10 @@ public partial class Client {
             context.Client.ShowErrorMessage("Your multiplayer mod is older than this server's co-op build. You can " +
                                             "still play, but other players' moves and weapons, and hits on enemies, " +
                                             "won't be in sync. Ask the host for the new mod.");
+        } else if (!context.Client.SupportsEnemySync) {
+            context.Client.ShowErrorMessage("Your multiplayer mod is older than this server's co-op build. You can " +
+                                            "still play, but enemies will move on their own in each game. Ask the " +
+                                            "host for the new mod.");
         }
     }
 
@@ -338,6 +342,12 @@ public partial class Client {
     [PacketHandler(MPPacketType.MP_PACKET_MOBY_KILLED)]
     public static void HandleMobyKilled(PacketContext context) {
         (context.GetHandler() as Player)?.RelayToLevel(MPPacketType.MP_PACKET_MOBY_KILLED, context.Body, reliable: true);
+    }
+
+    [PacketHandler(MPPacketType.MP_PACKET_ENEMY_STATE)]
+    public static void HandleEnemyState(PacketContext context) {
+        (context.GetHandler() as Player)?.RelayToLevel(MPPacketType.MP_PACKET_ENEMY_STATE, context.Body, reliable: false,
+            minimumVersion: Client.API_VERSION_ENEMY_SYNC);
     }
 
     [PacketHandler(MPPacketType.MP_PACKET_CONTROLLER_INPUT)]

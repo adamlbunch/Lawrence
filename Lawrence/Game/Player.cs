@@ -586,16 +586,18 @@ partial class Player {
     /// <summary>
     /// Passes a packet from this player's game on to the other players on the same level whose mod understands it.
     ///  The body starts with this player's ID, which the server swaps for the ID each receiving game knows this
-    ///  player by. Used for the pose snapshots (unreliable, 60 a second) and for hits and kills on the level's
-    ///  enemies and objects (reliable).
+    ///  player by. Used for the pose snapshots and the states of the enemies this player's game runs (unreliable, 60
+    ///  a second) and for hits and kills on the level's enemies and objects (reliable). Only games with at least
+    ///  `minimumVersion` of the mod get it.
     /// </summary>
-    public void RelayToLevel(MPPacketType type, byte[] body, bool reliable) {
+    public void RelayToLevel(MPPacketType type, byte[] body, bool reliable,
+                             uint minimumVersion = Client.API_VERSION_MIRRORING) {
         if (_level == null || body.Length < 2) {
             return;
         }
 
         foreach (var other in _level.Find<Player>().ToList()) {
-            if (other == this || !other._client.SupportsMirroring) {
+            if (other == this || other._client.ApiVersion < minimumVersion) {
                 continue;
             }
 

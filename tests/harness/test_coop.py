@@ -20,7 +20,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 from fake_client import (FakeClient, MOBY_UPDATE, CIRCLE, CUTSCENE, PLAYER_CONTROL, UI_LIST_MENU, EVENT_ITEM_ACTIVATED,
                          STATE_PLANET, STATE_GIVE_BOLTS, STATE_COMMUNICATION_FLAGS, STATE_UNLOCK_LEVEL, STATE_SAVE_FILE_OPERATION,
-                         SAVE_OPERATION_LOAD, LOADING, MOBY_CREATE, MOBY_EX, PLAYER_STATE, MOBY_HIT, API_VERSION_MIRRORING)
+                         SAVE_OPERATION_LOAD, LOADING, MOBY_CREATE, MOBY_EX, PLAYER_STATE, MOBY_HIT, API_VERSION_MIRRORING,
+                         API_VERSION_ENEMY_SYNC)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 BUILD = os.environ.get('LAWRENCE_BUILD', os.path.join(REPO, 'Lawrence', 'bin', 'publish', 'win-x64'))
@@ -325,10 +326,15 @@ class CampaignSyncTests(CoopTestCase):
         guest.wait_for(lambda: guest.states(STATE_PLANET, mark), what='load level after rejoin')
 
 
+ENEMY_STATE = 37
+EFFECTS = 38
+RELAY_LAST = 63
+
+
 class MirroringTests(CoopTestCase):
     def setUp(self):
         super().setUp()
-        mirroring = {'api_version': API_VERSION_MIRRORING, 'confirm_creates': True}
+        mirroring = {'api_version': API_VERSION_ENEMY_SYNC, 'confirm_creates': True}
         self.client_options = {'alpha': mirroring, 'bravo': dict(mirroring)}
 
     def guest_sees_host(self, host, guest):
@@ -361,6 +367,44 @@ class MirroringTests(CoopTestCase):
         self.assertIn('older than this server', old.error_messages()[0])
         time.sleep(0.5)
         self.assertEqual(new.error_messages(), [])
+
+    def test_mod_without_enemy_sync_is_told(self):
+        self.client_options['bravo'] = {'api_version': API_VERSION_MIRRORING}
+        new, old = self.client('alpha'), self.client('bravo')
+        old.wait_for(lambda: old.error_messages(), what='notice about the older mod')
+        self.assertIn('enemies will move on their own', old.error_messages()[0])
+        time.sleep(0.5)
+        self.assertEqual(new.error_messages(), [])
+
+    def test_enemy_states_and_effects_reach_other_player_with_their_id_for_sender(self):
+        host, guest = self.start_game()
+        host_uuid = self.guest_sees_host(host, guest)
+
+        mark = guest.mark()
+        payload = bytes(range(70))
+        for packet_type in (ENEMY_STATE, EFFECTS, RELAY_LAST):
+            host.send(packet_type, b'\x00\x00' + payload)
+        time.sleep(0.5)
+
+        for packet_type in (ENEMY_STATE, EFFECTS, RELAY_LAST):
+            bodies = guest.wait_for(lambda: guest.packets(packet_type, mark), what=f'relayed packet {packet_type}')
+            sender, = struct.unpack_from('>H', bodies[0], 0)
+            self.assertEqual(sender, host_uuid)
+            self.assertEqual(bodies[0][2:], payload)
+
+    def test_mod_without_enemy_sync_gets_no_enemy_states(self):
+        self.client_options['bravo'] = {'api_version': API_VERSION_MIRRORING, 'confirm_creates': True}
+        host, guest = self.start_game()
+        self.guest_sees_host(host, guest)
+
+        mark = guest.mark()
+        for _ in range(10):
+            host.send(ENEMY_STATE, bytes(70))
+            host.send(EFFECTS, bytes(70))
+        time.sleep(0.5)
+
+        self.assertEqual(guest.packets(ENEMY_STATE, mark), [])
+        self.assertEqual(guest.packets(EFFECTS, mark), [])
 
     def test_old_mod_gets_no_snapshots(self):
         self.client_options['bravo'] = {'confirm_creates': True}
