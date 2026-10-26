@@ -14,6 +14,7 @@ function CoopPlayer:Made()
     self.clanky = null
     
     self.gameState = 0
+    self.controlSince = 0
     self.pendingMobyDeletions = {}
 
     self.skillpointCounters = {
@@ -61,12 +62,27 @@ function CoopPlayer:Save()
 end
 
 -- Deleting an NPC or item while this player is watching a cutscene that uses it freezes their game (e.g. one player
---  skipping the Plumber cutscene while the other is still in it). Deletions wait until the player is back in control.
+--  skipping the Plumber cutscene while the other is still in it). Deletions wait until the player is back in control,
+--  and has been for a second: a conversation hands back control for a moment between its parts, and the game's
+--  report that a cutscene started can come after what happened in it.
+local DELETE_AFTER_CONTROL_TICKS = 60
+
 function CoopPlayer:DeleteWorldMoby(oClass)
-    if self.gameState == GameState.PlayerControl then
+    table.insert(self.pendingMobyDeletions, oClass)
+    self:DeletePendingMobys()
+end
+
+function CoopPlayer:DeletePendingMobys()
+    if #self.pendingMobyDeletions == 0 or self.gameState ~= GameState.PlayerControl or
+            self:Ticks() - self.controlSince < DELETE_AFTER_CONTROL_TICKS then
+        return
+    end
+
+    local pending = self.pendingMobyDeletions
+    self.pendingMobyDeletions = {}
+
+    for _, oClass in ipairs(pending) do
         self:DeleteAllChildrenWithOClass(oClass)
-    else
-        table.insert(self.pendingMobyDeletions, oClass)
     end
 end
 
@@ -261,6 +277,8 @@ function CoopPlayer:OnTick()
     if (self.damageCooldown > 0) then
         self.damageCooldown = self.damageCooldown - 1
     end
+
+    self:DeletePendingMobys()
 end
 
 function CoopPlayer:OnGameStateChanged(state)
@@ -273,13 +291,8 @@ function CoopPlayer:OnGameStateChanged(state)
         self.pendingMobyDeletions = {}
     end
 
-    if state == GameState.PlayerControl and #self.pendingMobyDeletions > 0 then
-        local pending = self.pendingMobyDeletions
-        self.pendingMobyDeletions = {}
-
-        for _, oClass in ipairs(pending) do
-            self:DeleteAllChildrenWithOClass(oClass)
-        end
+    if state == GameState.PlayerControl then
+        self.controlSince = self:Ticks()
     end
 end
 
@@ -380,7 +393,9 @@ function CoopPlayer:OnUnlockLevel(level)
     for _, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
         player:UnlockLevel(level)
 
-        if player:Level() == self:Level() then
+        -- Not in the game of the player who got it: that's still going through it, the game takes care of its own
+        --  (Eudora's Fred, deleted between the parts of his conversation, left that player on a black screen)
+        if player:Level() == self:Level() and player:GUID() ~= self:GUID() then
             if level == 2 then  -- Aridia
                 player:DeleteWorldMoby(774)  -- Delete Plumber
             end

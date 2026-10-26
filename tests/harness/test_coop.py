@@ -18,10 +18,10 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from fake_client import (FakeClient, MOBY_UPDATE, CIRCLE, CUTSCENE, PLAYER_CONTROL, UI_LIST_MENU, EVENT_ITEM_ACTIVATED,
+from fake_client import (FakeClient, MOBY_UPDATE, CIRCLE, CUTSCENE, MOVIE, PLAYER_CONTROL, UI_LIST_MENU, EVENT_ITEM_ACTIVATED,
                          STATE_PLANET, STATE_GIVE_BOLTS, STATE_COMMUNICATION_FLAGS, STATE_UNLOCK_LEVEL, STATE_SAVE_FILE_OPERATION,
                          SAVE_OPERATION_LOAD, LOADING, MOBY_CREATE, MOBY_EX, PLAYER_STATE, MOBY_HIT, API_VERSION_MIRRORING,
-                         API_VERSION_ENEMY_SYNC)
+                         API_VERSION_ENEMY_SYNC, STATE_COLLECTED_GOLD_BOLT, STATE_BLOCK_GOLD_BOLT)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 BUILD = os.environ.get('LAWRENCE_BUILD', os.path.join(REPO, 'Lawrence', 'bin', 'publish', 'win-x64'))
@@ -203,7 +203,6 @@ class CampaignSyncTests(CoopTestCase):
 
         host.set_state(STATE_UNLOCK_LEVEL, ARIDIA)
 
-        host.wait_for(lambda: PLUMBER_OCLASS in host.deleted_oclasses(host_mark), what='Plumber deleted for host')
         guest.wait_for(lambda: (0, ARIDIA) in guest.states(STATE_UNLOCK_LEVEL, guest_mark), what='Aridia unlock')
         time.sleep(1)
         self.assertNotIn(PLUMBER_OCLASS, guest.deleted_oclasses(guest_mark),
@@ -211,6 +210,37 @@ class CampaignSyncTests(CoopTestCase):
 
         guest.set_game_state(PLAYER_CONTROL)
         guest.wait_for(lambda: PLUMBER_OCLASS in guest.deleted_oclasses(guest_mark), what='deferred Plumber delete')
+        self.assertNotIn(PLUMBER_OCLASS, host.deleted_oclasses(host_mark),
+                         "Plumber was deleted in the game of the player who's talking to him")
+
+    def test_npc_not_deleted_between_parts_of_a_conversation(self):
+        """Eudora's Fred, deleted when his conversation handed back control for a moment, left a black screen."""
+        host, guest = self.start_game()
+        guest.set_game_state(CUTSCENE)
+        time.sleep(0.3)
+        guest_mark = guest.mark()
+
+        host.set_state(STATE_UNLOCK_LEVEL, ARIDIA)
+        guest.wait_for(lambda: (0, ARIDIA) in guest.states(STATE_UNLOCK_LEVEL, guest_mark), what='Aridia unlock')
+
+        guest.set_game_state(PLAYER_CONTROL)
+        time.sleep(0.2)
+        guest.set_game_state(MOVIE)
+        time.sleep(1.5)
+        self.assertNotIn(PLUMBER_OCLASS, guest.deleted_oclasses(guest_mark),
+                         'Plumber was deleted while control was only handed back for a moment')
+
+        guest.set_game_state(PLAYER_CONTROL)
+        guest.wait_for(lambda: PLUMBER_OCLASS in guest.deleted_oclasses(guest_mark), what='deferred Plumber delete')
+
+    def test_gold_bolt_taken_out_of_other_levels(self):
+        host, guest = self.start_game()
+        mark = guest.mark()
+
+        host.set_state(STATE_COLLECTED_GOLD_BOLT, 2, NOVALIS)
+
+        guest.wait_for(lambda: (NOVALIS, 2) in guest.states(STATE_BLOCK_GOLD_BOLT, mark), what='gold bolt blocked')
+        self.assertNotIn((NOVALIS, 2), host.states(STATE_BLOCK_GOLD_BOLT), 'gold bolt blocked for the collector')
 
     def test_no_lost_or_duplicated_packets_after_stall(self):
         """Packets piling up while a client isn't acking (movies, loading, lag spikes) were dropped past 256."""
