@@ -133,6 +133,8 @@ function CoopPlayer:OnCollectedGoldBolt(planet, number)
     for _, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
         if player:GUID() ~= self:GUID() then
             player:SetAddressValue(Player.offset.goldBolts + planet * 4 + number, 1, 1)
+            -- And it's gone from their level too, instead of floating there to be picked up again
+            player:BlockGoldBolt(planet, number)
             player:ToastMessage("\x0cGold Bolt\x08 acquired", 60*5)
         end
     end
