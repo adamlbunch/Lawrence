@@ -488,11 +488,24 @@ partial class Client {
     }
 
     public void SetDataClient(TcpClient tcpClient) {
-        _tcpClient = tcpClient;
+        File? pending;
+        lock (_sendFileLock) {
+            _tcpClient = tcpClient;
+            pending = _pendingFile;
+            _pendingFile = null;
+        }
+
+        if (pending != null) {
+            SendFile(pending);
+        }
     }
 
     // Files are sent from background tasks; two sends to the same client at once would interleave on the stream
     private readonly object _sendFileLock = new();
+
+    // The newest file sent before the game opened its data stream, sent once it does. A player joining a game in
+    //  progress is sent the save to load right away, before their game has had time to open it.
+    private File? _pendingFile;
 
     // Larger than any save file, but stops a corrupt header from making us allocate gigabytes
     private const uint MaxDataStreamPayload = 64 * 1024 * 1024;
@@ -501,6 +514,8 @@ partial class Client {
         Task.Run(() => {
             lock (_sendFileLock) {
                 if (_tcpClient is not { } tcpClient) {
+                    Logger.Log($"Holding {file.FileType} for {GetUsername()} until their data stream opens");
+                    _pendingFile = file;
                     return;
                 }
 

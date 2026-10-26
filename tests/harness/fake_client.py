@@ -86,7 +86,8 @@ DEFERRED_WHILE_BUSY = {MOBY_CREATE, MOBY_UPDATE, MOBY_EX, CHANGE_MOBY_VALUE, MOB
 
 
 class FakeClient:
-    def __init__(self, username, port, host='127.0.0.1', api_version=API_VERSION, confirm_creates=False):
+    def __init__(self, username, port, host='127.0.0.1', api_version=API_VERSION, confirm_creates=False,
+                 data_stream_delay=0):
         self.username = username
         self.api_version = api_version
         self.confirm_creates = confirm_creates  # Confirm moby creates like the game does (GameClient::create_moby)
@@ -117,6 +118,7 @@ class FakeClient:
         self.save_data = f'save file of {username}'.encode() * 2000
         self.files_received = []
         self.data_stream = None
+        self.data_stream_delay = data_stream_delay  # Seconds the game takes to open the data stream when told to
 
         self.running = True
         self._threads = [
@@ -225,6 +227,7 @@ class FakeClient:
                     threading.Thread(target=self.upload_save, daemon=True).start()
 
     def _data_stream_loop(self, key):
+        time.sleep(self.data_stream_delay)
         stream = socket.create_connection(self.addr)
         stream.sendall(struct.pack('>I', key))
         self.data_stream = stream

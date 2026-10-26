@@ -500,6 +500,25 @@ class CampaignPersistenceTests(CoopTestCase):
             player.wait_for(lambda p=player: (0, ARIDIA) in p.states(STATE_UNLOCK_LEVEL), what='unlocks restored')
             self.assertEqual(player.states(STATE_PLANET), [], 'started a new game instead of continuing')
 
+    def test_save_reaches_player_joining_before_their_data_stream_opens(self):
+        """A player joining a game in progress is sent the save to load right away, before their game has opened
+        the data stream files go over. The server used to drop it, leaving them without the campaign."""
+        host, guest = self.play_and_save()
+        guest.disconnect()
+        time.sleep(1)
+
+        self.client_options['bravo'] = {'data_stream_delay': 8}
+        guest = self.client('bravo')
+        self.join_lobby(guest, 'secret')
+        guest.wait_for(lambda: guest.has_text('Options'), what='rejoined lobby')
+        guest.press(CIRCLE)
+        guest.wait_for(lambda: (0, SAVE_OPERATION_LOAD) in guest.states(STATE_SAVE_FILE_OPERATION),
+                       what='told to load the saved game')
+        self.assertIsNone(guest.data_stream, 'data stream opened too early for this test')
+
+        saves = (host.save_data, guest.save_data)
+        guest.wait_for(lambda: any(f in saves for f in guest.files_received), timeout=20, what='saved game sent')
+
     def test_new_game_keeps_backup_of_old_campaign(self):
         self.play_and_save()
         self.restart_server()
