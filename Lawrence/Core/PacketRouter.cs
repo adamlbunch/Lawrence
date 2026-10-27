@@ -17,6 +17,12 @@ public class PacketRouter(Client client) {
 
         if (handler is null && header.PacketType >= MPPacketType.MP_PACKET_RELAY_FIRST &&
             header.PacketType <= MPPacketType.MP_PACKET_RELAY_LAST) {
+            // Reliable ones are acked like any other, or the game sends them again every second for good, and each
+            //  of those went to the other players as a new one (Kerwan's traffic flooded them with 450 KB/s)
+            if (!client.TakeInReliable(header)) {
+                return;
+            }
+
             (client.ClientHandler as global::Lawrence.Game.Player)?.RelayToLevel(header.PacketType, body,
                 reliable: header.RequiresAck != 0,
                 minimumVersion: Client.API_VERSION_ENEMY_SYNC);

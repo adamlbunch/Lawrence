@@ -24,6 +24,7 @@ public partial class Client {
                     
             if (!context.Client._handshakeCompleted) {
                 context.Client._handshakeCompleted = true;
+                context.Client.ForgetTakenIn();
             }
             else {
                 response.Header.AckCycle = 0;

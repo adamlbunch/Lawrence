@@ -153,6 +153,16 @@ class FakeClient:
             self.sock.sendto(header + body, self.addr)
             return requires_ack, ack_cycle
 
+    def send_again(self, packet_type, body, requires_ack, ack_cycle):
+        """Sends a reliable packet again with the ack ID it had, like Client::on_tick does until it's acked."""
+        with self.lock:
+            header = HEADER.pack(packet_type, 0, len(body), self._now(), requires_ack, ack_cycle)
+            self.sock.sendto(header + body, self.addr)
+
+    def got_ack(self, requires_ack, ack_cycle):
+        with self.lock:
+            return (requires_ack, ack_cycle) in self.rpc_responses
+
     def _send_ack(self, ack_id, ack_cycle):
         with self.lock:
             self.sock.sendto(HEADER.pack(ACK, 0, 0, self._now(), ack_id, ack_cycle), self.addr)
@@ -336,8 +346,8 @@ class FakeClient:
         self.send(UI_EVENT, struct.pack('>HHIH', event_type, element_id, data, len(extra)) + extra, reliable=True)
 
     def set_state(self, state_type, value, offset=0):
-        self.send(SET_STATE, struct.pack('>HHII', 0, state_type, offset & 0xFFFFFFFF, value & 0xFFFFFFFF),
-                  reliable=True)
+        return self.send(SET_STATE, struct.pack('>HHII', 0, state_type, offset & 0xFFFFFFFF, value & 0xFFFFFFFF),
+                         reliable=True)
 
     def set_game_state(self, state):
         with self.lock:

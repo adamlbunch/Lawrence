@@ -19,17 +19,10 @@ public class AckMiddleware: IMiddleware {
                 return;
             }
             
-            if ((header.Flags & MPPacketFlags.MP_PACKET_FLAG_RPC) == 0) {
-                // If it's not RPC, we just ack the packet and process the packet
-                MPPacketHeader ack = new MPPacketHeader {
-                    PacketType = MPPacketType.MP_PACKET_ACK,
-                    Flags = 0,
-                    Size = 0,
-                    RequiresAck = header.RequiresAck,
-                    AckCycle = header.AckCycle
-                };
-
-                client.SendPacket(ack, null);
+            if ((header.Flags & MPPacketFlags.MP_PACKET_FLAG_RPC) == 0 && !client.TakeInReliable(header)) {
+                // If it's not RPC, we ack the packet and process it, unless we already did: the game sent it again
+                //  because our ack hadn't reached it yet
+                return;
             }
             
             if ((header.Flags & MPPacketFlags.MP_PACKET_FLAG_RPC) != 0) {

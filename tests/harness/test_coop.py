@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fake_client import (FakeClient, MOBY_UPDATE, CIRCLE, CUTSCENE, MOVIE, PLAYER_CONTROL, UI_LIST_MENU, EVENT_ITEM_ACTIVATED,
                          STATE_PLANET, STATE_GIVE_BOLTS, STATE_COMMUNICATION_FLAGS, STATE_UNLOCK_LEVEL, STATE_SAVE_FILE_OPERATION,
                          SAVE_OPERATION_LOAD, LOADING, MOBY_CREATE, MOBY_EX, PLAYER_STATE, MOBY_HIT, API_VERSION_MIRRORING,
-                         API_VERSION_ENEMY_SYNC, STATE_COLLECTED_GOLD_BOLT, STATE_BLOCK_GOLD_BOLT)
+                         API_VERSION_ENEMY_SYNC, STATE_COLLECTED_GOLD_BOLT, STATE_BLOCK_GOLD_BOLT, SET_STATE)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 BUILD = os.environ.get('LAWRENCE_BUILD', os.path.join(REPO, 'Lawrence', 'bin', 'publish', 'win-x64'))
@@ -233,6 +233,20 @@ class CampaignSyncTests(CoopTestCase):
         guest.set_game_state(PLAYER_CONTROL)
         guest.wait_for(lambda: PLUMBER_OCLASS in guest.deleted_oclasses(guest_mark), what='deferred Plumber delete')
 
+    def test_reliable_packet_sent_again_is_taken_in_once(self):
+        """A gold bolt the game reported again, because the server's ack hadn't reached it yet, was given twice."""
+        host, guest = self.start_game()
+        mark = guest.mark()
+
+        ack = host.set_state(STATE_COLLECTED_GOLD_BOLT, 1, NOVALIS)
+        host.wait_for(lambda: host.got_ack(*ack), what='ack for the gold bolt')
+        host.send_again(SET_STATE, struct.pack('>HHII', 0, STATE_COLLECTED_GOLD_BOLT, NOVALIS, 1), *ack)
+
+        guest.wait_for(lambda: (NOVALIS, 1) in guest.states(STATE_BLOCK_GOLD_BOLT, mark), what='gold bolt blocked')
+        time.sleep(1)
+        self.assertEqual(guest.states(STATE_BLOCK_GOLD_BOLT, mark).count((NOVALIS, 1)), 1,
+                         'the gold bolt was taken in twice')
+
     def test_gold_bolt_taken_out_of_other_levels(self):
         host, guest = self.start_game()
         mark = guest.mark()
@@ -358,6 +372,7 @@ class CampaignSyncTests(CoopTestCase):
 
 ENEMY_STATE = 37
 EFFECTS = 38
+MOVERS = 40
 RELAY_LAST = 63
 
 
@@ -421,6 +436,21 @@ class MirroringTests(CoopTestCase):
             sender, = struct.unpack_from('>H', bodies[0], 0)
             self.assertEqual(sender, host_uuid)
             self.assertEqual(bodies[0][2:], payload)
+
+    def test_reliable_relayed_packets_are_acked_and_relayed_once(self):
+        """Mover changes went unacked, so the game sent each again every second for good, and every one of those went to
+        the other players as a new one: 450 KB/s on Kerwan, and what queued behind them arrived a minute late."""
+        host, guest = self.start_game()
+        self.guest_sees_host(host, guest)
+
+        mark = guest.mark()
+        body = bytes(2) + bytes(range(40))
+        ack = host.send(MOVERS, body, reliable=True)
+        host.wait_for(lambda: host.got_ack(*ack), what='ack for the mover change')
+
+        host.send_again(MOVERS, body, *ack)
+        time.sleep(1)
+        self.assertEqual(len(guest.packets(MOVERS, mark)), 1, 'a mover change sent again was relayed again')
 
     def test_mod_without_enemy_sync_gets_no_enemy_states(self):
         self.client_options['bravo'] = {'api_version': API_VERSION_MIRRORING, 'confirm_creates': True}

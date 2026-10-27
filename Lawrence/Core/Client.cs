@@ -99,6 +99,12 @@ public partial class Client {
     public readonly AckedMetadata[] Acked = new AckedMetadata[256];
     private readonly List<AckedMetadata> _unacked = new();
 
+    // The reliable packets from the game we've taken in, by ack ID: their ack cycle and when. The game sends one again
+    //  every second until our ack gets there, and a packet taken in twice was acted on twice (a gold bolt given twice)
+    //  or, relayed, went to the other players again as a new one.
+    private readonly (byte Cycle, long Time)[] _takenIn = new (byte, long)[256];
+    private const long TakenInMemoryMs = 5000;
+
     // Ack IDs run 1-254 per cycle, so the window must stay well below that for IDs to be unique among unacked packets
     private const int MaxUnackedInFlight = 192;
     private const int MaxPendingReliable = 16384;
@@ -109,6 +115,42 @@ public partial class Client {
     
     private readonly PacketRouter _router;
     
+    /// <summary>
+    /// Acks a reliable packet from the game (that isn't an RPC, which gets its reply instead), and says whether it's new:
+    ///  false for one we already took in, which the game sent again because our ack hadn't reached it yet.
+    /// </summary>
+    public bool TakeInReliable(MPPacketHeader header) {
+        if (header.PacketType == MPPacketType.MP_PACKET_ACK || header.RequiresAck == 0) {
+            return true;
+        }
+
+        if ((header.Flags & MPPacketFlags.MP_PACKET_FLAG_RPC) == 0) {
+            SendPacket(new MPPacketHeader {
+                PacketType = MPPacketType.MP_PACKET_ACK,
+                Flags = 0,
+                Size = 0,
+                RequiresAck = header.RequiresAck,
+                AckCycle = header.AckCycle
+            }, null);
+        }
+
+        long now = (long)Server.Time();
+        var taken = _takenIn[header.RequiresAck];
+        if (taken.Time != 0 && taken.Cycle == header.AckCycle && now - taken.Time < TakenInMemoryMs) {
+            return false;
+        }
+
+        _takenIn[header.RequiresAck] = (header.AckCycle, now);
+        return true;
+    }
+
+    /// <summary>
+    /// The game started over (connecting again): its ack IDs start over too.
+    /// </summary>
+    public void ForgetTakenIn() {
+        Array.Clear(_takenIn);
+    }
+
     public Client(IPEndPoint endpoint, uint id, Server server) {
         ID = id;
         _endpoint = endpoint;
