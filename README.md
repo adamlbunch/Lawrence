@@ -1,4 +1,15 @@
 # Lawrence
+
+**This is the server for [Ratchet & Clank Co-op](https://github.com/adamlbunch/rac1-multiplayer).** To host a game,
+follow that project's quick start: its `setup/setup-server.ps1` builds this server from `main` and sets it up for
+co-op. To build it by hand (any .NET SDK from 8 on):
+```
+dotnet publish Lawrence -c Release -f net8.0 -r win-x64 --self-contained -p:PublishSingleFile=true -o <folder>
+```
+It started as a fork of [bordplate/Lawrence](https://github.com/bordplate/Lawrence). The original as it was when we
+forked it is on the `upstream-main` branch. This fork doesn't publish releases, and the rest of this README is from the
+original.
+
 Lawrence is a Lua scriptable game server for the [Ratchet & Clank 1 Multiplayer mod](https://github.com/bordplate/rac1-multiplayer).
 
 ![Lawrence-demo.png](.github/media/Lawrence-demo.png)

@@ -1,0 +1,25 @@
+name: Build
+
+# Checks that the server builds the way setup-server.ps1 in adamlbunch/rac1-multiplayer builds it. Nothing is published.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build
+        run: dotnet publish Lawrence -c Release -f net8.0 -r win-x64 --self-contained -p:PublishSingleFile=true -o publish
+
+      - name: Check the co-op mod is included
+        run: if (-not (Test-Path publish/mods/coop)) { throw 'The build has no mods/coop' }
+        shell: pwsh
