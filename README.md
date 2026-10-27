@@ -1,55 +1,99 @@
-# Lawrence
+# Lawrence: the Ratchet & Clank Co-op server (guide for AI agents)
 
-**This is the server for [Ratchet & Clank Co-op](https://github.com/adamlbunch/rac1-multiplayer).** To host a game,
-follow that project's quick start: its `setup/setup-server.ps1` builds this server from `main` and sets it up for
-co-op. To build it by hand (any .NET SDK from 8 on):
+**People:** give your AI agent https://github.com/adamlbunch/rac1-multiplayer instead. That's the setup guide, and it
+builds this server for you.
+
+**Agents:** this is the game server for [Ratchet & Clank Co-op](https://github.com/adamlbunch/rac1-multiplayer). Only
+the **host** player runs it. The guest just connects to it. To set up co-op for a user, follow that repository's
+README: its `setup/setup-server.ps1` clones this repository's `main`, builds it and writes everything below. Use this
+page to check, fix or run the server by hand. If your web tool shortens long pages, read the plain text instead:
+https://raw.githubusercontent.com/adamlbunch/Lawrence/main/README.md
+
+## What it is
+
+Lawrence is a game server for the rac1-multiplayer mod, written in C# (.NET 8) and scripted in Lua. Game modes are
+Lua mods in `Lawrence/mods/`, and co-op is `mods/coop`. Players reach it with the mod's Direct IP over UDP and TCP,
+port 2407 by default. There's no public co-op server: each co-op game runs on its host's PC, and the guest reaches it
+over Tailscale.
+
+## Build
+
+Needs Git and a .NET SDK 8 or newer (`dotnet --list-sdks`). Ask the user before installing either.
+
+```powershell
+git clone https://github.com/adamlbunch/Lawrence "$HOME\src\Lawrence"
+dotnet publish "$HOME\src\Lawrence\Lawrence" -c Release -f net8.0 -r win-x64 --self-contained -p:PublishSingleFile=true -o "$HOME\Emulators\Lawrence"
 ```
-dotnet publish Lawrence -c Release -f net8.0 -r win-x64 --self-contained -p:PublishSingleFile=true -o <folder>
-```
-It started as a fork of [bordplate/Lawrence](https://github.com/bordplate/Lawrence). The original as it was when we
-forked it is on the `upstream-main` branch. This fork doesn't publish releases, and the rest of this README is from the
-original.
 
-Lawrence is a Lua scriptable game server for the [Ratchet & Clank 1 Multiplayer mod](https://github.com/bordplate/rac1-multiplayer).
+Check: `Lawrence.exe`, `lua54.dll`, `mods\coop` and `runtime` are in the output folder. This repository publishes no
+releases, so always build it from source.
 
-![Lawrence-demo.png](.github/media/Lawrence-demo.png)
+## Settings
 
-## Installation
-Download the latest release from the releases page and extract it to a directory of your choice. Run the "Lawrence" executable to start the server and follow the configuration wizard.
+`settings.toml` sits next to `Lawrence.exe`. Write it **before the first start**: without a server name, the server
+stops at a setup prompt. Write it with `[IO.File]::WriteAllText` (UTF-8 without a byte order mark). For co-op:
 
-## Configuration
-When you start Lawrence for the first time, it'll start out with a configuration wizard that lets you configure which mods to activate, and other settings.
-At least 1 mod must be active for the server to do anything. Multiple mods can be active at the same time as long as they don't conflict with each other.
-
-## Advertising
-Lawrence can advertise itself to a directory server. This is useful if you want to make your server public. The directory server is a simple server that keeps track of all the servers that are currently running. 
-To allow people to connect to a publicly advertised server, you must make sure that you've opened the port that the server is running on in your firewall.
-
-### Configuration file
-The configuration file is located at `./settings.toml`. It's a [TOML](https://toml.io/en/) file that you can edit manually if you want to change the configuration after the wizard has run.
-
-Example configuration:
 ```toml
-
 [Server]
-name = "My Server"  # Name of the server as presented in the directory server 
-port = 2407  # Port that the server listens on, default is 2407
-max_players = 20  # Maximum number of players that can be connected to the server at the same time
-address = "0.0.0.0"  # Address that the server listens on, default is 0.0.0.0
-advertise = true  # Whether the server should advertise itself to the directory server
-description = """
-This is a test server for coop mode. This is test text for the description of the test serer for coop mode.
-"""  # Description of the server as presented in the directory server
-owner = "bordplate"  # Owner of the server as presented in the directory server
+name = "Ratchet Co-op"
+port = 2407
+max_players = 4
+address = "0.0.0.0"
+# Keep this server out of the public server list. Friends join with Direct IP.
+advertise = false
+# Plain console log instead of the full-screen UI
+interactive = false
 
 [Logger]
 path = "lawrence.log"
 
-[Mod]
-# Mods are populated here based on the mods that are available in the mods directory, using the name of the directory as the key.
-[Mod.tag]
+[Mod.coop]
 enabled = true
+
+# Only co-op is used. Listing the rest stops the server from rewriting this file.
+[Mod.hide-seek]
+enabled = false
+
+[Mod.mgb]
+enabled = false
+
+[Mod.race]
+enabled = false
+
+[Mod.randomizer]
+enabled = false
 
 [Mod.sandbox]
 enabled = false
+
+[Mod.tag]
+enabled = false
 ```
+
+## Running
+
+- Start `Lawrence.exe` from its own folder, or the `Start Co-op Server.cmd` that the setup script writes. Close its
+  window to stop it.
+- Check: `Select-String -Path lawrence.log -Pattern 'Started Lawrence'` shows `Started Lawrence on 0.0.0.0:2407`.
+- Firewall: the first start makes Windows ask whether to allow `Lawrence.exe`, and the user clicks Allow. Or, with the
+  user's OK, from an administrator PowerShell:
+  `New-NetFirewallRule -DisplayName "Ratchet Co-op Server" -Direction Inbound -Program "<folder>\Lawrence.exe" -Action Allow`
+- The co-op campaign is saved in `saves\coop` and continues across restarts. Copy it somewhere before anything that
+  could lose it.
+- Updating: stop the server, `git pull` in the clone, and run the same `dotnet publish` into the same folder.
+  `settings.toml` and `saves` stay. A clone still on the old `coop-fixes` branch (it's gone) needs
+  `git fetch --prune` and `git switch main` first. Both players must also be on the same release of the mod.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| The server waits for "Server Name" | `settings.toml` is missing or has no `name` |
+| Players can't connect | The server isn't running; the firewall; wrong IP or port; RPCS3's networking is off (see the mod's guide) |
+| The server says a player's mod is out of date | That player has the official mod or an older release: update their mod |
+
+## About this repository
+
+It started as a fork of [bordplate/Lawrence](https://github.com/bordplate/Lawrence) and is now the co-op project's
+server. The original as it was when forked is on the `upstream-main` branch. To change the server's code, read
+[AGENTS.md](AGENTS.md). Neither the original nor this fork has a license, so this fork doesn't publish builds.
