@@ -27,7 +27,11 @@ function LobbyView:initialize(player, lobby)
     for i, player in ipairs(self.lobby.players) do
         self:AddPlayerToList(player)
     end
-    self.lobby.players:AddObserver(function(list, action, item)
+    self.playersObserver = function(list, action, item)
+        if self:Detached() then
+            return
+        end
+
         if action == ObservableList.ADDED then
             self:AddPlayerToList(item)
         end
@@ -41,8 +45,9 @@ function LobbyView:initialize(player, lobby)
                 end
             end
         end
-    end)
-    
+    end
+    self.lobby.players:AddObserver(self.playersObserver)
+
     self.optionsListMenu = ListMenuElement(210, 30, 250, 215)
     self.descriptionTextArea = TextAreaElement(210, 250, 250, 110)
     
@@ -60,7 +65,11 @@ function LobbyView:initialize(player, lobby)
         self.optionsListMenu:AddItem(option.name, "", accessory)
     end
     
-    self.lobby.options:AddObserver(function(list, key, value)
+    self.optionsObserver = function(list, key, value)
+        if self:Detached() then
+            return
+        end
+
         for k, option in ipairs(self.lobby.optionsList) do
             if option.name == list[key].name then
                 if type(value) == "boolean" then
@@ -72,8 +81,9 @@ function LobbyView:initialize(player, lobby)
                 break
             end
         end
-    end)
-    
+    end
+    self.lobby.options:AddObserver(self.optionsObserver)
+
     self.optionsListMenu.ItemSelected = function(index)
         self.descriptionTextArea.Text = self.lobby.optionsList[index+1].description
     end
@@ -95,14 +105,19 @@ function LobbyView:initialize(player, lobby)
         self.optionsListMenu:GetItem(0).Accessory = "Change"
     end
     
-    self.lobby:AddReadyCallback(function(player)
+    self.readyCallback = function(player)
+        if self:Detached() then
+            return
+        end
+
         for i, item in ipairs(self.playersList:GetItems()) do
             if item.Title == player:Username() then
                 item.Accessory = player.ready and "Ready" or "Not Ready"
             end
         end
-    end)
-    
+    end
+    self.lobby:AddReadyCallback(self.readyCallback)
+
     self:AddElement(self.lobbyTextElement)
     self:AddElement(self.optionsTextElement)
     self:AddElement(self.playersList)
@@ -112,6 +127,19 @@ function LobbyView:initialize(player, lobby)
     
     self:AddElement(self.backButtonText)
     self:AddElement(self.startButtonText)
+end
+
+-- Once this screen is closed or its player gone, its callbacks come off the lobby. Every rejoin used to leave
+--  another set behind, updating screens nobody could see for as long as the lobby stayed open.
+function LobbyView:Detached()
+    if not self:IsDeleted() then
+        return false
+    end
+
+    self.lobby.players:RemoveObserver(self.playersObserver)
+    self.lobby.options:RemoveObserver(self.optionsObserver)
+    self.lobby:RemoveReadyCallback(self.readyCallback)
+    return true
 end
 
 function LobbyView:OnPresent()
@@ -141,6 +169,12 @@ function LobbyView:OnControllerInputPressed(input)
                 self.startButtonText.Text = "\x11 Ready"
             end
         elseif self.lobby:AllPlayersReady() then
+            local problem = self.lobby:PrepareStart()
+            if problem ~= nil then
+                self.PlayerTable:ShowErrorMessage(problem)
+                return
+            end
+
             self.PlayerTable:CloseLobbyView()
             self.lobby:Start()
         end

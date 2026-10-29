@@ -32,6 +32,7 @@ ERROR_MESSAGE = 21
 REGISTER_HYBRID_MOBY = 22
 CHANGE_MOBY_VALUE = 24
 LEVEL_FLAG_CHANGED = 25
+MONITORED_ADDRESS_CHANGED = 27
 UI = 29
 UI_EVENT = 30
 OPEN_DATA_STREAM = 31
@@ -50,6 +51,7 @@ STATE_PLANET = 4
 STATE_GAME = 5
 STATE_COLLECTED_GOLD_BOLT = 8
 STATE_BLOCK_GOLD_BOLT = 9
+STATE_ARBITRARY = 11
 STATE_GIVE_BOLTS = 13
 STATE_UNLOCK_LEVEL = 14
 STATE_LEVEL_FLAG = 15
@@ -89,12 +91,12 @@ DEFERRED_WHILE_BUSY = {MOBY_CREATE, MOBY_UPDATE, MOBY_EX, CHANGE_MOBY_VALUE, MOB
 
 class FakeClient:
     def __init__(self, username, port, host='127.0.0.1', api_version=API_VERSION, confirm_creates=False,
-                 data_stream_delay=0):
+                 data_stream_delay=0, user_id=None):
         self.username = username
         self.api_version = api_version
         self.confirm_creates = confirm_creates  # Confirm moby creates like the game does (GameClient::create_moby)
         self.created = {}        # moby uuid -> oClass, of creates we confirmed
-        self.user_id = random.randint(1, 2**31 - 1)
+        self.user_id = user_id or random.randint(1, 2**31 - 1)  # The game keeps its own for good
         self.addr = (host, port)
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -357,6 +359,27 @@ class FakeClient:
     def change_level_flag(self, level, flag_type, index, value):
         body = struct.pack('>HBB', flag_type, level, 1) + struct.pack('>BHI', 1, index, value)
         self.send(LEVEL_FLAG_CHANGED, body, reliable=True)
+
+    def report_bolts(self, diff, total):
+        """The game's bolt count changed (Player::on_tick): by `diff`, to `total`."""
+        return self.set_state(STATE_GIVE_BOLTS, diff, offset=total)
+
+    def address_changed(self, address, old, new, size=4):
+        """A value the server monitors changed in the game's memory."""
+        self.send(MONITORED_ADDRESS_CHANGED, struct.pack('>IHII', address, size, old, new), reliable=True)
+
+    def memory_writes(self, since=0):
+        """(address, value) of every value the server wrote into the game's memory."""
+        return self.states(STATE_ARBITRARY, since)
+
+    def bolts_set(self, since=0):
+        """Every bolt count the server set (not gave)."""
+        return [value for offset, value in self.states(STATE_GIVE_BOLTS, since) if offset == 1]
+
+    def bolts_given(self, since=0):
+        """Every amount of bolts the server gave, signed."""
+        return [value - (1 << 32) if value >= 1 << 31 else value
+                for offset, value in self.states(STATE_GIVE_BOLTS, since) if offset == 0]
 
     def level_flags(self, since=0):
         """(level, type, index, value) of every level flag the server wrote."""

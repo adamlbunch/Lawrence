@@ -51,14 +51,85 @@ function CoopPlayer:Made()
     self.respawnsThisLevel = 0
     self.lastRespawnLevel = -1
     self.allowRespawn = false
-    
+
+    self.restoring = false
+    self.restoreStartedAt = 0
+    self.restoreRespawnedAt = nil
+
     self.debugView = nil
 end
 
 function CoopPlayer:Save()
-    if self.ingame then
+    -- Not before the campaign is back in their game: they'd save what their old save had
+    if self.ingame and not self.restoring then
         self:SaveGame()
     end
+end
+
+-- A player who continues the campaign (rejoining a game, or everyone continuing it after a restart) loads their own
+--  last save, which can be much older than the campaign: the other player kept playing, or their game crashed. And
+--  loading it puts back what that save had, over what the server gave them when they started: the save arrives after
+--  that. Their game then reported its save's bolt count, a drop, and everyone lost the bolts collected since; and
+--  their kill counts went back for everyone the same way. So until the save's level has loaded and they've been in
+--  control for a moment, what their game reports from the save isn't shared, and then the campaign is given again.
+local RESTORE_AFTER_CONTROL_TICKS = 30
+-- In case the game never tells us it spawned
+local RESTORE_GIVE_UP_TICKS = 60 * 60 * 3
+
+function CoopPlayer:GiveCampaign()
+    local lobby = self.lobby
+
+    self:SetBolts(lobby.bolts)
+
+    for _, item in ipairs(lobby.unlockedItems) do
+        self:GiveItem(item, false)
+    end
+
+    for _, infobot in ipairs(lobby.unlockedInfobots) do
+        if infobot ~= 0 then
+            self:UnlockLevel(infobot)
+        end
+    end
+
+    for _, skillpoint in ipairs(lobby.unlockedSkillpoints) do
+        self:UnlockSkillpoint(skillpoint)
+    end
+
+    for _, bolt in ipairs(lobby.goldBolts) do
+        self:SetAddressValue(Player.offset.goldBolts + bolt.planet * 4 + bolt.number, 1, 1)
+        self:BlockGoldBolt(bolt.planet, bolt.number)
+    end
+
+    for address, _ in pairs(lobby.gildedItems) do
+        self:SetAddressValue(address, 1, 1)
+    end
+
+    for address, value in pairs(lobby.counters) do
+        self:SetAddressValue(address, value, 4)
+    end
+end
+
+function CoopPlayer:FinishRestoring()
+    if not self.restoring then
+        return
+    end
+
+    local ticks = self:Ticks()
+    local loaded = self.restoreRespawnedAt ~= nil and self.gameState == GameState.PlayerControl and
+            ticks - math.max(self.restoreRespawnedAt, self.controlSince) >= RESTORE_AFTER_CONTROL_TICKS
+
+    if not loaded and ticks - self.restoreStartedAt < RESTORE_GIVE_UP_TICKS then
+        return
+    end
+
+    if not loaded then
+        print(self:Username() .. "'s game didn't say it loaded its save, giving them the campaign anyway")
+    end
+
+    self.restoring = false
+    self:GiveCampaign()
+    -- And their save on the server is the campaign's again, not the old one they loaded
+    self:Save()
 end
 
 -- Deleting an NPC or item while this player is watching a cutscene that uses it freezes their game (e.g. one player
@@ -118,34 +189,29 @@ function CoopPlayer:Start()
         if saveFile ~= nil then
             self:SendFile(saveFile)
             self:LoadSaveFile()
-            
+
             self:ToastMessage("Load from existing save", 60 * 5)
         else
             -- Load last unlocked level
             self:LoadLevel(self.lobby.unlockedInfobots[#self.lobby.unlockedInfobots])
         end
 
-        self:SetBolts(self.lobby.bolts)
+        self:GiveCampaign()
 
-        for i, item in ipairs(self.lobby.unlockedItems) do
-            self:GiveItem(item, false)
-        end
-
-        for i, infobot in ipairs(self.lobby.unlockedInfobots) do
-            if infobot ~= 0 then
-                self:UnlockLevel(infobot)
-            end
-        end
-
-        for i, skillpoint in ipairs(self.lobby.unlockedSkillpoints) do
-            self:UnlockSkillpoint(skillpoint)
-        end
+        self.restoring = true
+        self.restoreStartedAt = self:Ticks()
+        self.restoreRespawnedAt = nil
     end
 end
 
 function CoopPlayer:OnCollectedGoldBolt(planet, number)
     print("Player collected gold bolt on " .. planet .. " number: " .. number);
-    
+
+    -- Already the campaign's: their save was older than when it was taken
+    if not self.lobby:AddGoldBolt(planet, number) then
+        return
+    end
+
     for _, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
         if player:GUID() ~= self:GUID() then
             player:SetAddressValue(Player.offset.goldBolts + planet * 4 + number, 1, 1)
@@ -159,6 +225,14 @@ function CoopPlayer:OnCollectedGoldBolt(planet, number)
 end
 
 function CoopPlayer:OnRespawned()
+    if self.restoring then
+        -- Spawning in the level their save took them to, not a death
+        if self.restoreRespawnedAt == nil then
+            self.restoreRespawnedAt = self:Ticks()
+        end
+        return
+    end
+
     if self.lobby.options.deathLink.value then
         if not self.allowRespawn then
             print("Seems like a player died. Killing everyone.")
@@ -191,8 +265,13 @@ function CoopPlayer:MonitoredAddressChanged(address, oldValue, newValue)
         end
     end
 
+    -- Before they've started, it's whatever their game had in memory, maybe from another campaign
+    if not self.ingame then
+        return
+    end
+
     if address == 0x96BF88 then
-        if self.lobby.options.deathLink.value then
+        if self.lobby.options.deathLink.value and not self.restoring then
             print("" .. self:Username() .. " went from " .. oldValue .. " to " .. newValue .. " nanotech")
             for _, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
                 if newValue == 0 then
@@ -206,20 +285,29 @@ function CoopPlayer:MonitoredAddressChanged(address, oldValue, newValue)
         end
     end
     
-    if addressIsSkillpointCounter and newValue > oldValue then
-        for _, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
-            if player:GUID() ~= self:GUID() then
-                player:SetAddressValue(address, newValue, 4)
+    if addressIsSkillpointCounter then
+        local campaignValue = self.lobby:CounterChanged(address, newValue)
+
+        if newValue < campaignValue then
+            -- From a save older than the campaign. It used to be sent to the others, lowering theirs.
+            self:SetAddressValue(address, campaignValue, 4)
+        elseif newValue > oldValue then
+            for _, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
+                if player:GUID() ~= self:GUID() then
+                    player:SetAddressValue(address, newValue, 4)
+                end
             end
+
+            self:Save()
         end
-        
-        self:Save()
     end
-    
+
     if address >= Player.offset.gildedItems and address <= Player.offset.gildedItems + 35 then
         local itemIndex = address - Player.offset.gildedItems + 2
-        
+
         if newValue ~= 0 then
+            self.lobby:AddGildedItem(address)
+
             for _, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
                 if player:GUID() ~= self:GUID() then
                     player:SetAddressValue(address, 1, 1)
@@ -279,6 +367,7 @@ function CoopPlayer:OnTick()
     end
 
     self:DeletePendingMobys()
+    self:FinishRestoring()
 end
 
 function CoopPlayer:OnGameStateChanged(state)
@@ -438,6 +527,11 @@ end
 
 
 function CoopPlayer:OnGiveBolts(boltDiff, totalBolts)
+    -- Their save's bolt count, not bolts they picked up: they get the campaign's count once it's loaded
+    if self.restoring then
+        return
+    end
+
     self.totalBolts = totalBolts
     self.lobby:BoltsChanged(totalBolts)
     for _, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
@@ -453,12 +547,28 @@ function CoopPlayer:OnDisconnect()
     end
 end
 
+function CoopPlayer:OnLevelFlagChanged(flagType, level, size, index, value)
+    if self.ingame then
+        self.lobby:LevelFlagChanged(level, flagType, index, value)
+    end
+end
+
 function CoopPlayer:DownloadedFile(file)
+    if self.restoring then
+        -- What they loaded, saved before the campaign is back in their game (the game saves when it lands on a
+        --  planet). If their save didn't load, it'd be an empty game over their real save.
+        print("Not keeping the save " .. self:Username() .. " sent while their game was still loading theirs")
+        return
+    end
+
     self.saveMessageCountdown = 60 * 8
-    
+
     self.lobby:PlayerSentSaveFile(self, file)
-    
+
     for i, player in ipairs(self:Universe():LuaEntity():FindChildren("Player")) do
-        player:SendFile(file)
+        -- Not to players loading their own save: whichever arrived last is the one their game would load
+        if player:GUID() == self:GUID() or (player.ingame and not player.restoring) then
+            player:SendFile(file)
+        end
     end
 end

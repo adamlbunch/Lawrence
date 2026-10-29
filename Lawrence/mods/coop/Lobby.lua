@@ -93,8 +93,14 @@ function Lobby:initialize(host, password)
 
     self.savedCampaign = CampaignStore.Load()
     self.options.campaign.value = self.savedCampaign ~= nil
+    if self.savedCampaign ~= nil and self.savedCampaign.options ~= nil then
+        -- The settings the campaign was played with, for the host to keep or change
+        self.options.friendlyFire.value = self.savedCampaign.options.friendlyFire == true
+        self.options.deathLink.value = self.savedCampaign.options.deathLink == true
+    end
     self.resumed = false
-    self.lastCampaignSave = 0
+    self.dirty = false
+    self.closed = false
     
     self.readyCallbacks = {}
     
@@ -102,51 +108,110 @@ function Lobby:initialize(host, password)
     self.unlockedInfobots = {}
     self.unlockedSkillpoints = {}
     self.unlockedItems = {}
+    self.goldBolts = {}      -- {planet, number} of every gold bolt taken
+    self.gildedItems = {}    -- address -> true, of the gold weapons bought
+    self.counters = {}       -- address -> highest value, of the kill counts skill points need
+    self.levelFlags = {}     -- "level:type:index" -> {level, type, index, value}, of flags players changed
 
     self.primarySaveFile = nil
     self.saveFiles = {}
     
     self.universe = CoopUniverse(self)
-    
-    self.inactiveTimer = 0
 end
 
 function Lobby:AddReadyCallback(callback)
     table.insert(self.readyCallbacks, callback)
 end
 
+function Lobby:RemoveReadyCallback(callback)
+    for i, v in ipairs(self.readyCallbacks) do
+        if v == callback then
+            table.remove(self.readyCallbacks, i)
+            break
+        end
+    end
+end
+
+-- Returns why the game can't start, or nil once the campaign it's going to play is ready
+function Lobby:PrepareStart()
+    local running = lobbyUniverse:RunningLobby(self)
+    if running ~= nil then
+        -- Two games playing one campaign would each write it over the other's
+        return running.lobbyName .. "'s game is already playing the campaign on this server. Leave this lobby " ..
+                "(Triangle) and join theirs."
+    end
+
+    self.campaign = nil
+    if self.options.campaign.value then
+        -- Read again: the campaign may have moved on since this lobby opened (another game played it meanwhile)
+        self.campaign = CampaignStore.Load()
+        if self.campaign == nil then
+            return "The saved campaign couldn't be read (see the server's log). Switch Campaign to New game to " ..
+                    "start over: the old one is kept as a backup."
+        end
+    elseif not CampaignStore.Archive() then
+        return "The old campaign couldn't be moved aside for a new one (see the server's log), so nothing was " ..
+                "started. Close anything that has the server's saves folder open and try again."
+    end
+
+    self.prepared = true
+    return nil
+end
+
 function Lobby:Start()
-    if self.options.campaign.value and self.savedCampaign ~= nil then
-        local campaign = self.savedCampaign
+    if not self.prepared then
+        local problem = self:PrepareStart()
+        if problem ~= nil then
+            print("Can't start " .. self.lobbyName .. "'s lobby: " .. problem)
+            return
+        end
+    end
+    self.prepared = false
+
+    if self.campaign ~= nil then
+        local campaign = self.campaign
 
         self.bolts = campaign.bolts or 0
         self.unlockedInfobots = campaign.unlockedInfobots or {0}
         self.unlockedItems = campaign.unlockedItems or {}
         self.unlockedSkillpoints = campaign.unlockedSkillpoints or {}
+        self.goldBolts = campaign.goldBolts or {}
+        for _, address in ipairs(campaign.gildedItems or {}) do
+            self.gildedItems[address] = true
+        end
+        for _, counter in ipairs(campaign.counters or {}) do
+            self.counters[counter.address] = counter.value
+        end
+        for _, flag in ipairs(campaign.levelFlags or {}) do
+            self:LevelFlagChanged(flag.level, flag.type, flag.index, flag.value)
+
+            local level = self.universe:GetLevelByGameID(flag.level)
+            if level ~= nil then
+                level:RestoreFlag(flag.type, flag.index, flag.value)
+            end
+        end
         self.saveFiles = campaign.saveFiles
         self.primarySaveFile = campaign.primarySaveFile
         self.resumed = true
 
         print("Continuing the saved co-op campaign from " .. tostring(campaign.savedAt))
     else
-        if self.savedCampaign ~= nil then
-            CampaignStore.Archive()
-        end
-
         self.unlockedInfobots = {self.options.startPlanet.value}
     end
 
+    self.campaign = nil
     self.savedCampaign = nil
 
     print("Starting lobby for: ")
     for i, player in ipairs(self.players) do
         print("  " .. player:Username())
-        
+
         player:CloseLobbyView()
         player:Start()
     end
 
     self.started = true
+    CampaignStore.Save(self)
 end
 
 function Lobby:Join(player)
@@ -158,8 +223,6 @@ function Lobby:Join(player)
     
     player.lobbyView = LobbyView(player, self)
     player:AddEntity(player.lobbyView)
-    
-    self.inactiveTimer = 0
 end
 
 function Lobby:Leave(player, disconnecting)
@@ -181,12 +244,16 @@ function Lobby:Leave(player, disconnecting)
     if not disconnecting then
         lobbyUniverse:AddEntity(player)
     end
+
+    -- Once everyone's gone the lobby closes (see LobbyUniverse:OnTick): the campaign is on disk, and whoever comes
+    --  back continues it in a new lobby. An empty lobby kept open could be started again by one player while another
+    --  continued the campaign in a lobby of their own, and both would write it.
 end
 
 function Lobby:PlayerReady(player)
     player.ready = not player.ready
-    
-    for i, callback in ipairs(self.readyCallbacks) do
+
+    for i, callback in ipairs({table.unpack(self.readyCallbacks)}) do
         callback(player)
     end
 end
@@ -201,14 +268,29 @@ function Lobby:AllPlayersReady()
     return true
 end
 
+local function contains(list, value)
+    for _, v in ipairs(list) do
+        if v == value then
+            return true
+        end
+    end
+
+    return false
+end
+
 function Lobby:AddUnlockedItem(item_id)
-    table.insert(self.unlockedItems, item_id)
-    CampaignStore.Save(self)
+    -- The game can unlock an item it already has (it did, every time the campaign continued)
+    if not contains(self.unlockedItems, item_id) then
+        table.insert(self.unlockedItems, item_id)
+        CampaignStore.Save(self)
+    end
 end
 
 function Lobby:AddUnlockedInfobot(infobot_id)
-    table.insert(self.unlockedInfobots, infobot_id)
-    CampaignStore.Save(self)
+    if not contains(self.unlockedInfobots, infobot_id) then
+        table.insert(self.unlockedInfobots, infobot_id)
+        CampaignStore.Save(self)
+    end
 end
 
 function Lobby:AddUnlockedSkillpoint(skillpoint_id)
@@ -216,13 +298,62 @@ function Lobby:AddUnlockedSkillpoint(skillpoint_id)
     CampaignStore.Save(self)
 end
 
--- Bolts change constantly, so they're written at most every 10 seconds (and whenever anything else is saved)
-function Lobby:BoltsChanged(totalBolts)
-    self.bolts = totalBolts
+function Lobby:HasGoldBolt(planet, number)
+    for _, bolt in ipairs(self.goldBolts) do
+        if bolt.planet == planet and bolt.number == number then
+            return true
+        end
+    end
 
-    if os.time() - self.lastCampaignSave >= 10 then
+    return false
+end
+
+-- Returns whether it's new to the campaign
+function Lobby:AddGoldBolt(planet, number)
+    if self:HasGoldBolt(planet, number) then
+        return false
+    end
+
+    table.insert(self.goldBolts, {planet = planet, number = number})
+    CampaignStore.Save(self)
+    return true
+end
+
+function Lobby:AddGildedItem(address)
+    if not self.gildedItems[address] then
+        self.gildedItems[address] = true
         CampaignStore.Save(self)
     end
+end
+
+-- Kill counts only go up in the game, so a lower one comes from a save older than the campaign: the highest wins.
+--  Returns the campaign's count.
+function Lobby:CounterChanged(address, value)
+    local highest = self.counters[address] or 0
+    if value > highest then
+        self.counters[address] = value
+        self:MarkDirty()
+        return value
+    end
+
+    return highest
+end
+
+function Lobby:LevelFlagChanged(level, flagType, index, value)
+    self.levelFlags[level .. ":" .. flagType .. ":" .. index] = {level = level, type = flagType, index = index,
+                                                                 value = value}
+    self:MarkDirty()
+end
+
+-- For what changes too often to write every time (bolts, level flags): it's written within a second, see
+--  LobbyUniverse:OnTick. Bolts used to be written at most every 10 seconds, and only with the next change.
+function Lobby:MarkDirty()
+    self.dirty = true
+end
+
+function Lobby:BoltsChanged(totalBolts)
+    self.bolts = totalBolts
+    self:MarkDirty()
 end
 
 function Lobby:HasSkillpoint(skillpointId)
@@ -249,6 +380,15 @@ function Lobby:PlayerSentSaveFile(player, saveFile)
 end
 
 function Lobby:Close()
+    if self.closed then
+        return
+    end
+    self.closed = true
+
+    if self.started and self.dirty then
+        CampaignStore.Save(self)
+    end
+
     lobbyUniverse:RemoveLobby(self)
     self.universe:Delete()
 end

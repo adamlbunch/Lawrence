@@ -504,7 +504,7 @@ public class Game {
 
     /// <summary>
     /// Writes text to a file relative to the server folder, creating folders as needed. The file is replaced
-    ///  atomically so a crash mid-write doesn't corrupt the previous version.
+    ///  atomically so a crash mid-write doesn't corrupt the previous version, which is kept as `path.bak`.
     /// </summary>
     public bool WriteTextFile(string path, string text) {
         return WriteFileAtomically(path, System.Text.Encoding.UTF8.GetBytes(text));
@@ -529,6 +529,10 @@ public class Game {
         return new Client.File(MPFileType.MPFileTypeSaveFile, System.IO.File.ReadAllBytes(path).ToList());
     }
 
+    public bool DirectoryExists(string path) {
+        return Directory.Exists(path);
+    }
+
     public bool MoveDirectory(string from, string to) {
         try {
             if (!Directory.Exists(from)) {
@@ -551,8 +555,26 @@ public class Game {
             }
 
             var temporaryPath = path + ".tmp";
-            System.IO.File.WriteAllBytes(temporaryPath, data);
-            System.IO.File.Move(temporaryPath, path, true);
+            using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write)) {
+                stream.Write(data);
+                // On the disk before it replaces the last version: otherwise a power cut or a crash of the PC can
+                //  leave an empty file in its place, even though the rename itself is atomic
+                stream.Flush(true);
+            }
+
+            if (!System.IO.File.Exists(path)) {
+                System.IO.File.Move(temporaryPath, path);
+                return true;
+            }
+
+            // The last version stays as .bak, to go back to if this one turns out to be unreadable or a bad save
+            try {
+                System.IO.File.Replace(temporaryPath, path, path + ".bak");
+            } catch (IOException) {
+                System.IO.File.Copy(path, path + ".bak", true);
+                System.IO.File.Move(temporaryPath, path, true);
+            }
+
             return true;
         } catch (Exception e) {
             Logger.Error($"Failed to write {path}", e);

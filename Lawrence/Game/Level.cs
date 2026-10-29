@@ -182,6 +182,22 @@ public class Level : Entity {
         return _hybridMobys;
     }
 
+    /// <summary>
+    /// Takes a flag players changed in an earlier session back in, without sending it to anyone: it's sent like the
+    ///  flags changed in this one, to players heading to the level. Their saves can be older than the flag.
+    /// </summary>
+    public void RestoreFlag(ushort type, ushort index, uint value) {
+        if (type == 1 && index < LevelFlags1.Length) {
+            LevelFlags1[index] = (byte)value;
+            ChangedLevelFlags1.Add(index);
+        } else if (type == 2 && index < LevelFlags2.Length) {
+            LevelFlags2[index] = (byte)value;
+            ChangedLevelFlags2.Add(index);
+        } else {
+            Logger.Error($"Can't restore level flag {index} of type {type}");
+        }
+    }
+
     public void OnFlagChanged(Player originatingPlayer, ushort type, byte size, ushort index, uint value) {
         switch(type) {
             case 1:

@@ -24,7 +24,9 @@ function ObservableList:RemoveObserver(observerCallback)
 end
 
 function ObservableList:NotifyObservers(action, item)
-    for i, v in ipairs(self.observers) do
+    -- A copy, so observers can remove themselves while being notified
+    local observers = {table.unpack(self.observers)}
+    for i, v in ipairs(observers) do
         v(self.list, action, item)
     end
 end

@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fake_client import (FakeClient, MOBY_UPDATE, CIRCLE, CUTSCENE, MOVIE, PLAYER_CONTROL, UI_LIST_MENU, EVENT_ITEM_ACTIVATED,
                          STATE_PLANET, STATE_GIVE_BOLTS, STATE_COMMUNICATION_FLAGS, STATE_UNLOCK_LEVEL, STATE_SAVE_FILE_OPERATION,
                          SAVE_OPERATION_LOAD, LOADING, MOBY_CREATE, MOBY_EX, PLAYER_STATE, MOBY_HIT, API_VERSION_MIRRORING,
-                         API_VERSION_ENEMY_SYNC, STATE_COLLECTED_GOLD_BOLT, STATE_BLOCK_GOLD_BOLT, SET_STATE)
+                         API_VERSION_ENEMY_SYNC, STATE_COLLECTED_GOLD_BOLT, STATE_BLOCK_GOLD_BOLT, SET_STATE,
+                         SAVE_OPERATION_SAVE)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 BUILD = os.environ.get('LAWRENCE_BUILD', os.path.join(REPO, 'Lawrence', 'bin', 'publish', 'win-x64'))
@@ -30,6 +31,10 @@ LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
 NOVALIS = 1
 ARIDIA = 2
 PLUMBER_OCLASS = 774
+
+GOLD_BOLTS = 0xa0ca34
+ARIDIA_SHIPS_KILLED = 0x96c9dc
+GILDED_ITEMS = 0x969ca8
 
 
 def free_port():
@@ -151,6 +156,17 @@ class CoopTestCase(unittest.TestCase):
             player.enter_level(NOVALIS)
         time.sleep(0.5)
         return host, guest
+
+    def campaign_state(self):
+        with open(os.path.join(self.server.dir, 'saves', 'coop', 'campaign.json')) as state_file:
+            return json.load(state_file)
+
+    def campaign_bolts(self):
+        """The bolts on disk, or None while the server is replacing the file."""
+        try:
+            return self.campaign_state()['bolts']
+        except (OSError, ValueError):
+            return None
 
     def restart_server(self):
         for client in self.clients:
@@ -596,6 +612,222 @@ class CampaignPersistenceTests(CoopTestCase):
         backups = glob.glob(os.path.join(self.server.dir, 'saves', 'coop-backup-*', 'primary.sav'))
         self.assertEqual(len(backups), 1, 'old campaign was not backed up')
         self.assertFalse(os.path.exists(os.path.join(self.server.dir, 'saves', 'coop', 'primary.sav')))
+
+    def test_bolts_are_written_without_waiting_for_another_change(self):
+        """Bolts were written at most every 10 seconds, and only with the next change: a crash lost the last ones."""
+        host, guest = self.start_game()
+        host.set_state(STATE_UNLOCK_LEVEL, ARIDIA)  # Writes the campaign
+        time.sleep(0.5)
+
+        host.report_bolts(42, 42)
+
+        host.wait_for(lambda: self.campaign_bolts() == 42, timeout=3, what='bolts written to disk')
+
+    def test_progress_survives_a_server_crash(self):
+        host, guest = self.start_game()
+        host.set_state(STATE_COLLECTED_GOLD_BOLT, 2, NOVALIS)
+        host.change_level_flag(NOVALIS, 2, 113, 3)
+        host.address_changed(ARIDIA_SHIPS_KILLED, 0, 7)
+        host.address_changed(GILDED_ITEMS + 5, 0, 1, size=1)
+        host.report_bolts(250, 250)
+        host.set_state(STATE_UNLOCK_LEVEL, ARIDIA)  # And a save to continue from
+        host.wait_for(lambda: os.path.exists(os.path.join(self.server.dir, 'saves', 'coop', 'primary.sav')),
+                      what='save written')
+        time.sleep(1.5)
+        self.restart_server()  # Kills it, like a crash
+
+        host, guest = self.lobby_with_two_players()
+        self.start(host, guest)
+
+        for player in (host, guest):
+            player.wait_for(lambda p=player: (0, SAVE_OPERATION_LOAD) in p.states(STATE_SAVE_FILE_OPERATION),
+                            what='load saved game')
+            time.sleep(0.5)
+            mark = player.mark()
+            player.enter_level(NOVALIS)
+
+            player.wait_for(lambda p=player: 250 in p.bolts_set(mark), what='bolts')
+            player.wait_for(lambda p=player: (NOVALIS, 2) in p.states(STATE_BLOCK_GOLD_BOLT, mark), what='gold bolt')
+            player.wait_for(lambda p=player: (GOLD_BOLTS + NOVALIS * 4 + 2, 1) in p.memory_writes(mark),
+                            what='gold bolt collected')
+            player.wait_for(lambda p=player: (ARIDIA_SHIPS_KILLED, 7) in p.memory_writes(mark), what='kill count')
+            player.wait_for(lambda p=player: (GILDED_ITEMS + 5, 1) in p.memory_writes(mark), what='gold weapon')
+            player.wait_for(lambda p=player: (NOVALIS, 2, 113, 3) in p.level_flags(mark), what='level flag')
+
+    def test_unreadable_campaign_continues_from_previous_version(self):
+        self.play_and_save()
+        self.server.stop(keep_files=True)
+        campaign = os.path.join(self.server.dir, 'saves', 'coop', 'campaign.json')
+        self.assertTrue(os.path.exists(campaign + '.bak'), 'no previous version kept')
+        with open(campaign, 'w') as state_file:
+            state_file.write('{"bolts": 12, "unlockedIt')  # Cut off, like a disk that lost the end of it
+        self.server = LawrenceServer(self.server.dir)
+
+        host, guest = self.lobby_with_two_players()
+        self.start(host, guest)
+
+        for player in (host, guest):
+            player.wait_for(lambda p=player: (0, SAVE_OPERATION_LOAD) in p.states(STATE_SAVE_FILE_OPERATION),
+                            what='load saved game')
+            self.assertEqual(player.states(STATE_PLANET), [], 'started a new game instead of continuing')
+
+    def test_new_game_over_unreadable_campaign_keeps_it(self):
+        """With campaign.json unreadable there was no campaign to back up, and a new game wrote over its saves."""
+        self.play_and_save()
+        self.server.stop(keep_files=True)
+        campaign = os.path.join(self.server.dir, 'saves', 'coop')
+        for name in ('campaign.json', 'campaign.json.bak'):
+            with open(os.path.join(campaign, name), 'w') as state_file:
+                state_file.write('not json')
+        self.server = LawrenceServer(self.server.dir)
+
+        host, guest = self.lobby_with_two_players()
+        self.start(host, guest)
+        host.wait_for(lambda: host.states(STATE_PLANET), what='new game started')
+
+        backups = glob.glob(os.path.join(self.server.dir, 'saves', 'coop-backup-*', 'primary.sav'))
+        self.assertEqual(len(backups), 1, 'the old saves were not kept')
+
+
+class CrashAndRejoinTests(CoopTestCase):
+    def rejoin(self, previous, password='secret'):
+        """The same player connecting again, like a game restarted after a crash (same user ID)."""
+        self.client_options[previous.username] = {'user_id': previous.user_id}
+        player = self.client(previous.username)
+        self.join_lobby(player, password)
+        player.wait_for(lambda: player.has_text('Options'), what='rejoined lobby')
+        player.press(CIRCLE)
+        # Their save, or without one on the server yet, the campaign's last level
+        player.wait_for(lambda: (0, SAVE_OPERATION_LOAD) in player.states(STATE_SAVE_FILE_OPERATION) or
+                        player.states(STATE_PLANET), what='told to load the saved game')
+        time.sleep(0.5)  # What the server sends along with that
+        return player
+
+    def test_rejoining_player_gets_what_was_done_while_away(self):
+        host, guest = self.start_game()
+        guest.upload_save()
+        host.report_bolts(100, 100)
+        time.sleep(0.5)
+        guest.close()  # Their game crashed
+        time.sleep(1)
+
+        host.set_state(STATE_COLLECTED_GOLD_BOLT, 2, NOVALIS)
+        host.address_changed(ARIDIA_SHIPS_KILLED, 0, 7)
+        host.address_changed(GILDED_ITEMS + 5, 0, 1, size=1)
+        host.report_bolts(700, 800)
+        time.sleep(0.5)
+
+        guest = self.rejoin(guest)
+        host_mark, mark = host.mark(), guest.mark()
+        # Loading their save took their bolts back to what it had, and the game reports that
+        guest.report_bolts(-700, 100)
+        guest.address_changed(ARIDIA_SHIPS_KILLED, 0, 3)
+        guest.enter_level(NOVALIS)
+
+        guest.wait_for(lambda: 800 in guest.bolts_set(mark), what='campaign bolts after loading')
+        guest.wait_for(lambda: (NOVALIS, 2) in guest.states(STATE_BLOCK_GOLD_BOLT, mark), what='gold bolt')
+        guest.wait_for(lambda: (GOLD_BOLTS + NOVALIS * 4 + 2, 1) in guest.memory_writes(mark), what='gold bolt')
+        guest.wait_for(lambda: (ARIDIA_SHIPS_KILLED, 7) in guest.memory_writes(mark), what='kill count')
+        guest.wait_for(lambda: (GILDED_ITEMS + 5, 1) in guest.memory_writes(mark), what='gold weapon')
+        guest.wait_for(lambda: (0, SAVE_OPERATION_SAVE) in guest.states(STATE_SAVE_FILE_OPERATION, mark),
+                       what='asked for a save with the campaign in it')
+        time.sleep(0.5)
+
+        self.assertEqual(host.bolts_given(host_mark), [], "the rejoining player's old save took the host's bolts")
+        self.assertNotIn((ARIDIA_SHIPS_KILLED, 3), host.memory_writes(host_mark), 'kill count went back')
+        self.assertEqual(self.campaign_state()['bolts'], 800)
+
+    def test_bolts_picked_up_after_rejoining_are_shared(self):
+        host, guest = self.start_game()
+        guest.close()
+        time.sleep(1)
+
+        guest = self.rejoin(guest)
+        mark = guest.mark()
+        guest.enter_level(NOVALIS)
+        # The campaign is given again and saved once their game has loaded
+        guest.wait_for(lambda: (0, SAVE_OPERATION_SAVE) in guest.states(STATE_SAVE_FILE_OPERATION, mark),
+                       what='campaign given again')
+        host_mark = host.mark()
+
+        guest.report_bolts(30, 30)
+
+        host.wait_for(lambda: 30 in host.bolts_given(host_mark), what='bolts shared again')
+
+    def test_old_kill_count_does_not_lower_the_others(self):
+        host, guest = self.start_game()
+        host.address_changed(ARIDIA_SHIPS_KILLED, 0, 20)
+        time.sleep(0.5)
+        host_mark, guest_mark = host.mark(), guest.mark()
+
+        guest.address_changed(ARIDIA_SHIPS_KILLED, 0, 5)
+
+        guest.wait_for(lambda: (ARIDIA_SHIPS_KILLED, 20) in guest.memory_writes(guest_mark), what='count put back')
+        self.assertNotIn((ARIDIA_SHIPS_KILLED, 5), host.memory_writes(host_mark), "the host's count went back")
+
+    def test_save_sent_while_still_loading_is_not_kept(self):
+        """The game saves when it lands on a planet. Right after loading an old save, that's the old save again,
+        or an empty game if the save didn't load: it isn't kept over the player's save."""
+        host, guest = self.start_game()
+        guest.upload_save()
+        players = os.path.join(self.server.dir, 'saves', 'coop', 'players')
+        guest.wait_for(lambda: os.path.exists(os.path.join(players, 'bravo.sav')), what='guest save written')
+        guest.close()
+        time.sleep(1)
+
+        guest = self.rejoin(guest)
+        guest.save_data = b'empty game' * 1000
+        guest.upload_save()
+        time.sleep(1)
+
+        with open(os.path.join(players, 'bravo.sav'), 'rb') as save:
+            self.assertNotEqual(save.read(), guest.save_data, "a save sent while loading replaced the player's save")
+
+    def test_lobby_closes_when_everyone_has_left_and_the_campaign_continues(self):
+        host, guest = self.start_game()
+        host.set_state(STATE_UNLOCK_LEVEL, ARIDIA)
+        time.sleep(1)
+        host.disconnect()
+        guest.disconnect()
+
+        host.wait_for(lambda: 'the campaign is saved' in self.server.log(), what='lobby closed')
+
+        host, guest = self.lobby_with_two_players()
+        self.start(host, guest)
+        for player in (host, guest):
+            player.wait_for(lambda p=player: (0, SAVE_OPERATION_LOAD) in p.states(STATE_SAVE_FILE_OPERATION),
+                            what='continue the campaign')
+            player.wait_for(lambda p=player: (0, ARIDIA) in p.states(STATE_UNLOCK_LEVEL), what='unlocks restored')
+
+    def test_second_lobby_cannot_play_the_running_campaign(self):
+        """Two games playing one campaign each wrote it over the other's (or a new game moved it away mid-game)."""
+        host, guest = self.start_game()
+        other = self.client('charlie')
+        self.create_lobby(other, '')
+        mark = other.mark()
+        other.press(CIRCLE)
+
+        other.wait_for(lambda: any('already playing the campaign' in m for m in other.error_messages()),
+                       what='told to join the running game')
+        time.sleep(0.5)
+        self.assertEqual(other.states(STATE_PLANET, mark), [], 'a second game started')
+        self.assertEqual(other.states(STATE_SAVE_FILE_OPERATION, mark), [], 'a second game started')
+        self.assertFalse(glob.glob(os.path.join(self.server.dir, 'saves', 'coop-backup-*')),
+                         'the running campaign was moved away')
+
+    def test_rejoins_do_not_pile_up_lobby_screens(self):
+        host, guest = self.start_game()
+        for _ in range(3):
+            guest.close()
+            time.sleep(1)
+            guest = self.rejoin(guest)
+
+        before = self.server.log().count('Removing player bravo')
+        guest.disconnect()
+        host.wait_for(lambda: 'bravo disconnected' in self.server.log()[-2000:], what='guest gone')
+        time.sleep(0.5)
+        self.assertLessEqual(self.server.log().count('Removing player bravo') - before, 1,
+                             'closed lobby screens still follow the lobby')
 
 
 if __name__ == '__main__':

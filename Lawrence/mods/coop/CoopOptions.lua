@@ -10,13 +10,22 @@ function CoopOptions:AddObserver(callback)
     table.insert(self.observerCallbacks, callback)
 end
 
+function CoopOptions:RemoveObserver(callback)
+    for i, v in ipairs(self.observerCallbacks) do
+        if v == callback then
+            table.remove(self.observerCallbacks, i)
+            break
+        end
+    end
+end
+
 function CoopOptions:__index(key)
     local obj = self.options[key]
     
     local this = self
 
     obj.set = function(self, value)
-        for i, callback in ipairs(this.observerCallbacks) do
+        for i, callback in ipairs({table.unpack(this.observerCallbacks)}) do
             callback(this.options, key, value)
         end
 

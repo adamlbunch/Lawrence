@@ -65,7 +65,15 @@ function LobbyListView:initialize(player, lobbyUniverse)
         end
     end
     
-    self.lobbyUniverse.lobbies:AddObserver(function(list, action, item) 
+    local lobbies = self.lobbyUniverse.lobbies
+    local lobbiesObserver
+    lobbiesObserver = function(list, action, item)
+        -- This list was closed or its player is gone: every player who ever opened the lobby list left one behind
+        if self:IsDeleted() then
+            lobbies:RemoveObserver(lobbiesObserver)
+            return
+        end
+
         if action == ObservableList.ADDED then
             self:AddToLobbyList(item)
         end
@@ -77,7 +85,8 @@ function LobbyListView:initialize(player, lobbyUniverse)
                 end
             end
         end
-    end)
+    end
+    lobbies:AddObserver(lobbiesObserver)
 
     self:AddElement(self.lobbyTextElement)
     self:AddElement(self.textArea)
